@@ -636,6 +636,16 @@ public sealed class MmapExtractorService
                 int chunkX = chunkIdx % 16;
                 int chunkY = chunkIdx / 16;
 
+                // Skip absent chunks. The ADT parser leaves _heights at 0 for
+                // chunks that have no MCNK entry in MCIN — without this guard
+                // the loop would still emit 145 vertices (9x9 V9 + 8x8 V8) at
+                // Y=0 for every absent chunk, which is the kill-plane
+                // artefact visible in BG maps like Eye of the Storm (map
+                // 566, mostly empty 3x3 neighbourhoods) where the extractor
+                // would otherwise build a vast flat walkable surface at Y=0.
+                if (!adt.GetChunkPresent(chunkIdx))
+                    continue;
+
                 float tileOriginX = (32 - adjX) * WowConstants.TileSize;
                 float tileOriginZ = (32 - adjY) * WowConstants.TileSize;
 
