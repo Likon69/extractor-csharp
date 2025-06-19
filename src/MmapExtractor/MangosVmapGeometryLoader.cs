@@ -104,6 +104,46 @@ internal sealed class MangosVmapGeometryLoader
     }
 
     /// <summary>
+    /// Append WDT-level worldspawn collision from the per-map .vmtree GOBJ chunk.
+    /// This is what MaNGOS loads through VMapManager for WMO-only instances that
+    /// have no ADT tiles and therefore no per-tile .vmtile files.
+    /// </summary>
+    public bool AppendGlobalCollision(
+        List<float> outVerts,
+        List<int> outTris,
+        List<byte> outAreas)
+    {
+        string vmtreePath = Path.Combine(_vmapDir, "vmaps", MangosVmapTree.GetFileName(_mapId));
+        if (!File.Exists(vmtreePath))
+            return false;
+
+        var (validMagic, _, globalSpawns) = MangosVmapTree.Read(vmtreePath);
+        if (!validMagic || globalSpawns.Count == 0)
+            return false;
+
+        int wmoCount = 0, m2Count = 0, loadedVmo = 0, loadedVmd = 0, skipped = 0;
+        foreach (var spawn in globalSpawns)
+        {
+            if (!_seenPlacementIds.Add(spawn.Id)) continue;
+
+            if (spawn.IsM2) m2Count++; else wmoCount++;
+            if (!AppendSpawnCollision(spawn, outVerts, outTris, outAreas, out bool addedVmo))
+            {
+                skipped++;
+                continue;
+            }
+            if (addedVmo) loadedVmo++; else loadedVmd++;
+        }
+
+        _logger.LogInformation(
+            "[Mmap-Vmap] {MapName} global .vmtree: {Wmo} WMO + {M2} M2 placements, " +
+            "{Vmo} .vmo + {Vmd} .vmd loaded, {Skip} skipped, {Tris} tris appended",
+            _mapName, wmoCount, m2Count, loadedVmo, loadedVmd, skipped, outTris.Count / 3);
+
+        return outVerts.Count > 0;
+    }
+
+    /// <summary>
     /// Append a single ModelSpawn's collision mesh to the output geometry.
     /// Returns true if the geometry was added (or there was nothing to add).
     /// `addedFromCompiledFile` is true for WMO, false for M2.
