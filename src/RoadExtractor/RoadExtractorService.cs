@@ -108,30 +108,36 @@ public sealed class RoadExtractorService
             return (false, 0, 256);
         }
 
-        byte[] roadFlags = new byte[256];
-        bool hasRoad = ExtractRoadMask(fileData.Span, roadFlags);
+        // 4×4 sub-zones per chunk × 256 chunks = 4096 bits = 512 bytes per ADT.
+        // Each bit says whether the sub-zone (8.33 × 8.33 yards) is a road
+        // (topmost opaque MCLY layer is road-textured). MmapExtruder reads
+        // this and applies NAV_ROAD per sub-triangle (each sub-triangle
+        // inherits the bit of its parent 2×2 sub-square).
+        byte[] roadMask = new byte[512];
+        bool hasRoad = ExtractRoadMask(fileData.Span, roadMask);
 
-        int roadChunkCount = roadFlags.Count(b => b == 1);
+        int roadBits = 0;
+        for (int i = 0; i < roadMask.Length; i++) roadBits += CountBits(roadMask[i]);
 
-        if (roadChunkCount > 0)
-            _logger.LogInformation("[Road] ADT ({TileX},{TileY}): {RoadChunks}/256 road chunks detected",
-                tileX, tileY, roadChunkCount);
+        if (roadBits > 0)
+            _logger.LogInformation("[Road] ADT ({TileX},{TileY}): {RoadBits}/4096 road sub-zones detected",
+                tileX, tileY, roadBits);
 
         try
         {
-            await File.WriteAllBytesAsync(filePath, roadFlags, ct);
-            return (true, roadChunkCount, 256);
+            await File.WriteAllBytesAsync(filePath, roadMask, ct);
+            return (true, roadBits, 4096);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "[Road] Failed to write road file: ({TileX},{TileY})", tileX, tileY);
-            return (false, roadChunkCount, 256);
+            return (false, roadBits, 4096);
         }
     }
 
     private static bool ExtractRoadMask(ReadOnlySpan<byte> data, byte[] roadMask)
     {
-        Array.Clear(roadMask, 0, 256);
+        Array.Clear(roadMask, 0, roadMask.Length);
 
         if (data.Length < 20)
             return false;
@@ -229,16 +235,109 @@ public sealed class RoadExtractorService
                 continue;
 
             int numLayers = (int)(mclySize / 16); // MCLYEntry size is 16
+            if (numLayers <= 0)
+                continue;
 
+            // Parse all MCLY entries: (textureId, flags, ofsAlpha).
+            // ofsAlpha is relative to the MCNK magic start, same convention
+            // as ofsLayer above. The alpha data lives inside the MCNK's MCAL
+            // sub-chunk (which is a sibling of MCLY in the MCNK sub-chunk
+            // list) but we don't need to parse the MCAL chunk header — the
+            // ofsAlpha offset jumps straight to this layer's alpha grid.
+            uint[] layerTexIdx = new uint[numLayers];
+            uint[] layerFlags  = new uint[numLayers];
+            uint[] layerOfsAlpha = new uint[numLayers];
+            bool[] layerIsRoad   = new bool[numLayers];
             for (int l = 0; l < numLayers; ++l)
             {
                 int layerOffset = (int)(mclyOff + 8 + l * 16);
-                uint texIdx = BitConverter.ToUInt32(data.Slice(layerOffset, 4));
-                if (texIdx < texNames.Count && IsRoadTexture(texNames[(int)texIdx]))
+                layerTexIdx[l]   = BitConverter.ToUInt32(data.Slice(layerOffset, 4));
+                layerFlags[l]    = BitConverter.ToUInt32(data.Slice(layerOffset + 4, 4));
+                layerOfsAlpha[l] = BitConverter.ToUInt32(data.Slice(layerOffset + 8, 4));
+                layerIsRoad[l]   = layerTexIdx[l] < texNames.Count
+                                   && IsRoadTexture(texNames[(int)layerTexIdx[l]]);
+            }
+
+            // MCLY flags (WotLK MCNK::Layers):
+            //   0x001 FLAG_ANIM             — animated texture
+            //   0x002 FLAG_USE_ALPHA         — layer uses an alpha map
+            //   0x004 FLAG_ALPHA_COMPRESSED  — alpha is 4×4 instead of 8×8
+            //   0x008 FLAG_CAST_SHADOWS      — layer casts shadows (irrelevant here)
+            //
+            // The "over" bit (0x002) is the FLAG_USE_ALPHA bit in WotLK
+            // format — some docs name it 0x002, some 0x004. The WoWDev wiki
+            // and MaNGOS use 0x004. We use 0x004.
+            const uint FLAG_USE_ALPHA = 0x004u;
+            const uint FLAG_ALPHA_COMPRESSED = 0x008u;
+            const int ALPHA_THRESHOLD = 128; // 0-255; above this = layer is "visible" at that sub-zone
+
+            // 4×4 sub-zones per chunk. 16 sub-zones × 256 chunks = 4096 bits.
+            // Each sub-zone covers a 2×2 quad of the 8×8 sub-triangle grid.
+            int chunkByteBase = ci * 2; // 2 bytes per chunk × 256 chunks = 512 bytes
+            for (int sz = 0; sz < 16; ++sz)
+            {
+                int subZoneY = sz / 4;
+                int subZoneX = sz % 4;
+
+                // Walk layers from top to bottom; the first one with effective
+                // opacity > ALPHA_THRESHOLD at this sub-zone is the topmost
+                // visible layer. Effective opacity:
+                //   - base layer (l == 0)        : 1.0 everywhere (covers all
+                //                                   by default; only opaque
+                //                                   below 255 in the alpha map
+                //                                   if FLAG_USE_ALPHA is set)
+                //   - any layer with FLAG_USE_ALPHA: alpha[sub-zone] from MCAL
+                //   - any layer without FLAG_USE_ALPHA: 1.0 everywhere
+                int topmostLayer = -1;
+                for (int l = numLayers - 1; l >= 0; --l)
                 {
-                    roadMask[chunkRow * 16 + chunkCol] = 1;
+                    int opacity;
+                    if ((layerFlags[l] & FLAG_USE_ALPHA) != 0)
+                    {
+                        // Alpha data offset is from MCNK magic. 16 bytes if
+                        // compressed (4×4), 64 bytes if uncompressed (8×8).
+                        // We only need the 4×4 value at (subZoneY, subZoneX),
+                        // so a compressed map is direct; an 8×8 map needs to
+                        // be downsampled by averaging the 2×2 sub-triangles
+                        // that share this sub-zone.
+                        long alphaAbs = (long)mcnkOff + layerOfsAlpha[l];
+                        if (alphaAbs < 0 || alphaAbs + 16 > data.Length)
+                        {
+                            opacity = 0; // bad offset → treat as transparent
+                        }
+                        else if ((layerFlags[l] & FLAG_ALPHA_COMPRESSED) != 0)
+                        {
+                            // 4×4 = 16 values, row-major
+                            opacity = data[(int)alphaAbs + subZoneY * 4 + subZoneX];
+                        }
+                        else
+                        {
+                            // 8×8 = 64 values, row-major
+                            int a00 = data[(int)alphaAbs + (subZoneY * 2 + 0) * 8 + (subZoneX * 2 + 0)];
+                            int a01 = data[(int)alphaAbs + (subZoneY * 2 + 0) * 8 + (subZoneX * 2 + 1)];
+                            int a10 = data[(int)alphaAbs + (subZoneY * 2 + 1) * 8 + (subZoneX * 2 + 0)];
+                            int a11 = data[(int)alphaAbs + (subZoneY * 2 + 1) * 8 + (subZoneX * 2 + 1)];
+                            opacity = (a00 + a01 + a10 + a11 + 2) / 4; // +2 for round-to-nearest
+                        }
+                    }
+                    else
+                    {
+                        // No alpha map → layer is opaque everywhere
+                        opacity = 255;
+                    }
+
+                    if (opacity > ALPHA_THRESHOLD)
+                    {
+                        topmostLayer = l;
+                        break;
+                    }
+                }
+
+                if (topmostLayer >= 0 && layerIsRoad[topmostLayer])
+                {
+                    int bitIndex = sz;
+                    roadMask[chunkByteBase + (bitIndex >> 3)] |= (byte)(1 << (bitIndex & 7));
                     anyRoad = true;
-                    break;
                 }
             }
         }
@@ -258,6 +357,16 @@ public sealed class RoadExtractorService
                 return true;
         }
         return false;
+    }
+
+    private static int CountBits(byte b)
+    {
+        // Brian Kernighan's bit count: b & (b-1) clears the lowest set bit
+        // each iteration. Faster than a naive popcnt on older hardware and
+        // identical result for our 512-byte road masks.
+        int c = 0;
+        while (b != 0) { b &= (byte)(b - 1); c++; }
+        return c;
     }
 
     internal void ClearCache() { }
