@@ -110,8 +110,7 @@ public sealed class MangosVmapExtractorService
         // groups them under a single global tile for instances/maps that
         // don't have terrain tiles.
         if (_wdtReader.WorldspawnWmoNames.Length > 0
-            && _wdtReader.WorldspawnWmoPlacements.Length > 0
-            && File.Exists(dirBinPath))
+            && _wdtReader.WorldspawnWmoPlacements.Length > 0)
         {
             for (int wi = 0; wi < _wdtReader.WorldspawnWmoPlacements.Length; wi++)
             {
