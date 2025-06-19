@@ -149,6 +149,8 @@ public static class Program
                 // Read terrain from the extracted .map files written by the
                 // map phase — same as C++ MapBuilder::buildTile → TerrainBuilder::loadMap.
                 string mapsDir = Path.Combine(options.OutputPath, "maps");
+                // Apply spatial filter toggle before creating the service.
+                MmapExtractorService.EnableSpatialFilter = !options.DisableSpatialFilter;
                 var svc = new MmapExtractorService(archives, _loggerFactory, mmapDir,
                     recast, options.Threads, options.GoSpawnsPath, offMeshPath: options.OffMeshPath,
                     roadMapsDir: roadDir, vmapDir: vmapDir, mapsDir: mapsDir);
@@ -226,6 +228,9 @@ public static class Program
                     if (++i >= args.Length) return BadArg("--locale <code>");
                     opts.Locale = args[i];
                     break;
+                case "--no-spatial-filter":
+                    opts.DisableSpatialFilter = true;
+                    break;
                 case "--gospawns":
                     if (++i >= args.Length) return BadArg("--gospawns <path>");
                     opts.GoSpawnsPath = args[i];
@@ -273,6 +278,7 @@ public static class Program
         Console.WriteLine("  --locale <code>     Locale code (default: enUS)");
         Console.WriteLine("  --gospawns <path>   gameobject_spawns.bin path (default: gameobject_spawns.bin)");
         Console.WriteLine("  --offmesh <path>    OffMesh connections file (offmesh.txt format)");
+        Console.WriteLine("  --no-spatial-filter Disable per-sub-tile triangle spatial pre-filtering");
     }
 
     private sealed class CliOptions
@@ -287,6 +293,7 @@ public static class Program
         public string Locale { get; set; } = "enUS";
         public string GoSpawnsPath { get; set; } = "gameobject_spawns.bin";
         public string? OffMeshPath { get; set; }
+        public bool DisableSpatialFilter { get; set; }
     }
 
     private sealed class ConsoleProgress : IProgress<TileProgressEvent>
