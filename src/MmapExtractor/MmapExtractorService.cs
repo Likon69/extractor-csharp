@@ -943,15 +943,42 @@ public sealed class MmapExtractorService
         float expandedMinZ = minZ - borderMeters;
         float expandedMaxZ = maxZ + borderMeters;
 
-        // Y bounds come from the FULL ADT geometry, not the filtered subset: the Detour
-        // tile header's bmin[1]/bmax[1] must cover the world's vertical extent so that
-        // pathfinding queries near the ground work regardless of which triangles were
-        // kept by the per-sub-tile spatial filter.
+        // Compute Y bounds from vertices inside the sub-tile's EXPANDED XZ bbox
+        // (sub-tile + border). Two reasons:
+        //
+        //   1. Without the XZ filter, far-away vertices from the 3x3 ADT
+        //      neighborhood (mountain peaks at Y=1300 vs local terrain at Y=-400)
+        //      inflated the heightfield Y range by ~1700 yards, far more than
+        //      walkableClimb cells — rcFilterLedgeSpans then stripped legitimate
+        //      high spans as ledges.
+        //
+        //   2. Darnassus/Teldrassil sits on top of a giant tree. The branches
+        //      that hang down on the sides of the tree are flagged as walkable in
+        //      the ADT data. On a sub-tile at the edge of the tree, a full Y
+        //      range that includes the city platform (Y=top) AND those hanging
+        //      branches (Y=top-500 to top-700) gives a heightfield wide enough to
+        //      rasterize the branches as isolated walkable spans — the bot then
+        //      pathfinds onto the side branches instead of staying on the city.
+        //      With a tight sub-tile Y range, only the local geometry defines the
+        //      heightfield and rcFilterLedgeSpans correctly treats the branches
+        //      as ledges relative to the local ground.
+        //
+        // Also fixes a long-standing off-by-one in the iteration: the loop used
+        // to start at v=1 with stride 3, which means it was reading Y values of
+        // every vertex while the comment claimed it was reading X. Any XZ filter
+        // based on this comparison was therefore silently broken — v=0 with
+        // stride 3 reads X,Y,Z correctly and the XZ bbox check actually filters.
         float minY = float.MaxValue, maxYh = float.MinValue;
-        for (int v = 1; v < geo.Vertices.Length; v += 3)
+        for (int v = 0; v < geo.Vertices.Length; v += 3)
         {
-            if (geo.Vertices[v] < minY) minY = geo.Vertices[v];
-            if (geo.Vertices[v] > maxYh) maxYh = geo.Vertices[v];
+            float vx = geo.Vertices[v];
+            float vy = geo.Vertices[v + 1];
+            float vz = geo.Vertices[v + 2];
+            if (vx < expandedMinX || vx > expandedMaxX ||
+                vz < expandedMinZ || vz > expandedMaxZ)
+                continue;
+            if (vy < minY) minY = vy;
+            if (vy > maxYh) maxYh = vy;
         }
         if (minY == float.MaxValue) { minY = 0; maxYh = 100f; }
 
