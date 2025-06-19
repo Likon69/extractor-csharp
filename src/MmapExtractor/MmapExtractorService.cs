@@ -42,6 +42,24 @@ public sealed class MmapExtractorService
     private readonly string? _mapsDir;  // directory containing maps/{id:D3}{y:D2}{x:D2}.map (output of map-extractor)
     private readonly bool _usesLiquids;
 
+    // --- Spatial filtering toggle (optimisation: reduce triCount per BuildTile call) ---
+    // When true, each sub-tile receives only the triangles whose AABB overlaps the
+    // sub-tile's expanded bbox (bbox + borderMeters). This is bit-identical to the
+    // unfiltered path because:
+    //   - rcClearUnwalkableTriangles marks triangles independently (no neighbour context),
+    //   - rcRasterizeTriangles does its own overlapBounds culling per triangle, so any
+    //     triangle fully outside the heightfield bbox contributes zero spans anyway.
+    // Keeping triangles slightly beyond the strict heightfield bbox (via borderMeters)
+    // is a safe superset of the strict requirement. Static so it can be flipped at
+    // runtime from tests / CLI without touching the constructor.
+    public static bool EnableSpatialFilter = true;
+
+    private readonly record struct BuildSubTileResult(RecastBuildResult Status, byte[]? Data)
+    {
+        public bool IsFailure => (int)Status < 0;
+        public bool HasData => Data is { Length: > 0 };
+    }
+
     public MmapExtractorService(
         IArchiveReader archive,
         ILoggerFactory loggerFactory,
@@ -192,6 +210,10 @@ public sealed class MmapExtractorService
         var tiles = _wdtReader.GetExistingTiles();
         if (onlyTileX.HasValue && onlyTileY.HasValue)
             tiles = tiles.Where(t => t.X == onlyTileX.Value && t.Y == onlyTileY.Value).ToList();
+
+        if (tiles.Count == 0 && !onlyTileX.HasValue && !onlyTileY.HasValue)
+            tiles = DiscoverGlobalVmapTiles(mapId, mapName);
+
         _logger.LogInformation("Found {Count} ADT tiles for map {MapName} (id={MapId})", tiles.Count, mapName, mapId);
 
         // Log GO spawns for this specific map
@@ -237,6 +259,50 @@ public sealed class MmapExtractorService
         WriteMmapHeader(mapId, (uint)tiles.Count, maxAdtX, maxAdtY);
         return successCount;
     }
+
+    private List<(int X, int Y)> DiscoverGlobalVmapTiles(uint mapId, string mapName)
+    {
+        var tiles = new List<(int X, int Y)>();
+        if (string.IsNullOrEmpty(_vmapDir))
+            return tiles;
+
+        var verts = new List<float>();
+        var tris = new List<int>();
+        var areas = new List<byte>();
+        var loader = new MangosVmapGeometryLoader(_vmapDir, mapName, mapId, _logger);
+        if (!loader.AppendGlobalCollision(verts, tris, areas) || verts.Count == 0)
+            return tiles;
+
+        float minX = float.MaxValue, maxX = float.MinValue;
+        float minZ = float.MaxValue, maxZ = float.MinValue;
+        for (int i = 0; i < verts.Count; i += 3)
+        {
+            float x = verts[i];
+            float z = verts[i + 2];
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (z < minZ) minZ = z;
+            if (z > maxZ) maxZ = z;
+        }
+
+        int maxTileX = ClampGridCoord((int)(32 - minX / WowConstants.TileSize));
+        int maxTileY = ClampGridCoord((int)(32 - minZ / WowConstants.TileSize));
+        int minTileX = ClampGridCoord((int)(32 - maxX / WowConstants.TileSize));
+        int minTileY = ClampGridCoord((int)(32 - maxZ / WowConstants.TileSize));
+
+        for (int x = minTileX; x <= maxTileX; x++)
+            for (int y = minTileY; y <= maxTileY; y++)
+                tiles.Add((x, y));
+
+        _logger.LogInformation(
+            "[Mmap] Map {MapName} has no ADT tiles; global vmtree bounds X=[{MinX:F2},{MaxX:F2}] Z=[{MinZ:F2},{MaxZ:F2}] -> {Count} fallback tile(s)",
+            mapName, minX, maxX, minZ, maxZ, tiles.Count);
+
+        return tiles;
+    }
+
+    private static int ClampGridCoord(int value)
+        => Math.Clamp(value, 0, WowConstants.GridSize - 1);
 
     private void WriteMmapHeader(uint mapId, uint tileCount, int maxAdtX, int maxAdtY)
     {
@@ -311,12 +377,26 @@ public sealed class MmapExtractorService
             float bminX = (31 - tileX) * WowConstants.TileSize;
             float bminZ = (31 - tileY) * WowConstants.TileSize;
 
-            var navData = BuildNavMeshSubTilesSync(mapId, geometry, tileX, tileY, maxAdtX, maxAdtY, bminX, bminZ, ct);
-            if (navData.All(blob => blob == null || blob.Length == 0))
+            var subTiles = BuildNavMeshSubTilesSync(mapId, geometry, tileX, tileY, maxAdtX, maxAdtY, bminX, bminZ, ct);
+            var failedSubTiles = subTiles.Where(r => r.IsFailure).ToArray();
+            if (failedSubTiles.Length > 0)
             {
-                _logger.LogWarning("[Mmap] BuildTile returned empty for all sub-tiles in ADT ({TileX},{TileY})", tileX, tileY);
+                var failures = string.Join(", ", failedSubTiles
+                    .GroupBy(r => r.Status)
+                    .Select(g => $"{g.Key}={g.Count()}"));
+                _logger.LogWarning("[Mmap] BuildTile failed for ADT ({TileX},{TileY}) sub-tiles: {Failures}",
+                    tileX, tileY, failures);
                 return false;
             }
+
+            if (subTiles.All(r => !r.HasData))
+            {
+                _logger.LogInformation("[Mmap] No polygons to build for ADT ({TileX},{TileY}); skipping .mmtile like MaNGOS",
+                    tileX, tileY);
+                return true;
+            }
+
+            var navData = subTiles.Select(r => r.Data).ToArray();
             await WriteMmtileAsync(mapId, tileY, tileX, navData, ct);
             return true;
         }
@@ -362,10 +442,9 @@ public sealed class MmapExtractorService
         _logger.LogInformation("[Mmap] LoadTileGeometry adt=({CX},{CY}): {Loaded} ADTs loaded, {Skipped} skipped",
             centerX, centerY, loadedCount, skippedCount);
 
-        if (tiles.Count == 0)
-            return default;
-
-        var geo = ExtrudeTileGeometry(mapId, centerX, centerY, tiles, LoadRoadMask(mapId, centerX, centerY));
+        var geo = tiles.Count > 0
+            ? ExtrudeTileGeometry(mapId, centerX, centerY, tiles, LoadRoadMask(mapId, centerX, centerY))
+            : new TileGeometry(Array.Empty<float>(), Array.Empty<int>(), Array.Empty<byte>());
 
         // Add WMO and M2 building/object geometry to the navmesh.
         // Same intent as the original 9d63265 raw-ADT path (AppendWmoGeometryAsync + AppendM2Geometry),
@@ -380,7 +459,10 @@ public sealed class MmapExtractorService
             var modelAreas = new List<byte>();
 
             var loader = new MangosVmapGeometryLoader(_vmapDir, mapName, mapId, _logger);
-            loader.AppendNeighborhoodCollision(centerX, centerY, modelVerts, modelTris, modelAreas);
+            if (tiles.Count > 0)
+                loader.AppendNeighborhoodCollision(centerX, centerY, modelVerts, modelTris, modelAreas);
+            else
+                loader.AppendGlobalCollision(modelVerts, modelTris, modelAreas);
 
             if (modelVerts.Count > 0)
             {
@@ -634,7 +716,7 @@ public sealed class MmapExtractorService
         return new TileGeometry(vertices.ToArray(), indices.ToArray(), areas.ToArray());
     }
 
-    private byte[]?[] BuildNavMeshSubTilesSync(
+    private BuildSubTileResult[] BuildNavMeshSubTilesSync(
         uint mapId, TileGeometry geo, int adtX, int adtY, int maxAdtX, int maxAdtY,
         float adtMinX, float adtMinZ, CancellationToken ct = default)
     {
@@ -659,9 +741,16 @@ public sealed class MmapExtractorService
             omFlags[k]  = c.Flags;
         }
 
-        var navData = new byte[]?[WowConstants.SubTilesPerAdtSide * WowConstants.SubTilesPerAdtSide];
+        var subTiles = new BuildSubTileResult[WowConstants.SubTilesPerAdtSide * WowConstants.SubTilesPerAdtSide];
 
         int totalSlots = WowConstants.SubTilesPerAdtSide * WowConstants.SubTilesPerAdtSide;
+
+        // Border expansion (world units) applied to each sub-tile bbox before rasterization
+        // and (when filtering is enabled) before the spatial pre-filter. Mirrors the same
+        // borderMeters computed inside BuildNavMeshTileSync, so the filter bbox is a safe
+        // superset of the triangles Recast would actually use.
+        int borderSize = Math.Max(7, _recastConfig.WalkableRadius + 3);
+        float borderMeters = borderSize * _recastConfig.CellSize;
 
         // Sub-tiles are built sequentially within each ADT worker.
         // Parallelism is controlled at the outer tile level (Parallel.ForEachAsync);
@@ -680,22 +769,136 @@ public sealed class MmapExtractorService
             int detourTileX = (maxAdtX - adtX) * WowConstants.SubTilesPerAdtSide + subX;
             int detourTileY = (maxAdtY - adtY) * WowConstants.SubTilesPerAdtSide + subY;
 
-            navData[slot] = BuildNavMeshTileSync(
-                geo, detourTileX, detourTileY,
+            // Spatial pre-filter: cut the geometry to the triangles that can possibly
+            // contribute to this sub-tile. The vertex array is shared unchanged (the
+            // compacted tris still index into geo.Vertices); only tris + areas are
+            // compacted. See BuildFilteredGeometryForSubTile for the bit-identical proof.
+            int[] trisUsed = geo.Indices;
+            byte[] areasUsed = geo.Areas;
+            int triCountUsed = geo.IndexCount / 3;
+
+            if (EnableSpatialFilter)
+            {
+                var (fTris, fAreas, fCount) = BuildFilteredGeometryForSubTile(
+                    geo,
+                    minX - borderMeters, maxX + borderMeters,
+                    minZ - borderMeters, maxZ + borderMeters);
+
+                if (fCount > 0)
+                {
+                    trisUsed = fTris;
+                    areasUsed = fAreas;
+                    triCountUsed = fCount;
+
+                    _logger.LogDebug("[Mmap] Spatial filter sub-tile ({SX},{SY}) adt=({AX},{AY}): " +
+                        "{Kept}/{Total} triangles kept ({Pct:F1}%)",
+                        subX, subY, adtX, adtY, fCount, geo.IndexCount / 3,
+                        100.0 * fCount / (geo.IndexCount / 3));
+                }
+                // If fCount == 0 the sub-tile has no geometry — let BuildNavMeshTileSync
+                // run on the full arrays and produce the same empty result as before,
+                // to stay bit-identical with the unfiltered path in degenerate cases.
+            }
+
+            subTiles[slot] = BuildNavMeshTileSync(
+                geo, trisUsed, areasUsed, triCountUsed,
+                detourTileX, detourTileY,
                 minX, minZ, maxX, maxZ,
                 omVerts, omRads, omDirs, omAreas, omFlags);
         }
 
-        return navData;
+        return subTiles;
     }
 
-    private unsafe byte[]? BuildNavMeshTileSync(
-        TileGeometry geo, int adtX, int adtY,
+    /// <summary>
+    /// Spatially filters the ADT geometry down to the triangles that can possibly
+    /// contribute to a given sub-tile. Returns a compacted (tris, areas) pair along
+    /// with the reduced triCount; the vertex array is SHARED UNCHANGED with the
+    /// caller (indices in the compacted tris still reference the original verts).
+    ///
+    /// This is the hot-loop optimisation: instead of feeding 1M+ triangles to every
+    /// one of the 36 internal mini-tile builds in BuildTile (each of which re-runs
+    /// rcClearUnwalkableTriangles + 2× memcpy + 2× rewrite loop over triCount, none
+    /// of which has any bbox culling), we cut triCount to the triangles whose AABB
+    /// overlaps the sub-tile's expanded bbox before the P/Invoke.
+    ///
+    /// Bit-identical guarantee (verified against Recast source):
+    ///   - rcClearUnwalkableTriangles (Recast.cpp:360) computes each triangle's
+    ///     normal independently and never reads neighbour triangles → filtering
+    ///     out triangle X cannot change the area assignment of triangle Y.
+    ///   - rcRasterizeTriangles → rasterizeTri (RecastRasterization.cpp:325) already
+    ///     early-outs via overlapBounds(triBB, hfBB) for any triangle outside the
+    ///     heightfield bbox, so a triangle we keep but that falls outside the
+    ///     heightfield still produces zero spans — exactly as before.
+    /// The filter bbox uses the same borderMeters expansion as the heightfield
+    /// (BuildNavMeshTileSync), so it is a safe superset of the triangles Recast
+    /// would actually use.
+    ///
+    /// Returns triCount == 0 if no triangle qualifies (caller keeps original arrays
+    /// in that case via the EnableSpatialFilter branch in BuildNavMeshSubTilesSync).
+    /// </summary>
+    private static (int[] filteredTris, byte[] filteredAreas, int triCount) BuildFilteredGeometryForSubTile(
+        TileGeometry geo, float filterMinX, float filterMaxX, float filterMinZ, float filterMaxZ)
+    {
+        int[] srcTris = geo.Indices;
+        byte[] srcAreas = geo.Areas;
+        float[] srcVerts = geo.Vertices;
+
+        int triTotal = srcTris.Length / 3;
+        // Worst case: all triangles qualify. Allocate once, no List<int> boxing.
+        int[] outTris = new int[srcTris.Length];
+        byte[] outAreas = new byte[triTotal];
+        int kept = 0;
+
+        for (int t = 0; t < triTotal; t++)
+        {
+            int i0 = srcTris[t * 3 + 0];
+            int i1 = srcTris[t * 3 + 1];
+            int i2 = srcTris[t * 3 + 2];
+
+            // Compute the triangle's XZ AABB and test against the filter bbox.
+            // Vertices are packed (x,y,z) → stride 3; X is [0], Z is [2].
+            float vx0 = srcVerts[i0 * 3 + 0];
+            float vz0 = srcVerts[i0 * 3 + 2];
+            float vx1 = srcVerts[i1 * 3 + 0];
+            float vz1 = srcVerts[i1 * 3 + 2];
+            float vx2 = srcVerts[i2 * 3 + 0];
+            float vz2 = srcVerts[i2 * 3 + 2];
+
+            float tMinX = vx0; if (vx1 < tMinX) tMinX = vx1; if (vx2 < tMinX) tMinX = vx2;
+            float tMaxX = vx0; if (vx1 > tMaxX) tMaxX = vx1; if (vx2 > tMaxX) tMaxX = vx2;
+            float tMinZ = vz0; if (vz1 < tMinZ) tMinZ = vz1; if (vz2 < tMinZ) tMinZ = vz2;
+            float tMaxZ = vz0; if (vz1 > tMaxZ) tMaxZ = vz1; if (vz2 > tMaxZ) tMaxZ = vz2;
+
+            // overlapBounds: aMin <= bMax && aMax >= bMin (per axis).
+            if (tMinX > filterMaxX || tMaxX < filterMinX ||
+                tMinZ > filterMaxZ || tMaxZ < filterMinZ)
+            {
+                continue; // triangle entirely outside the sub-tile's expanded bbox
+            }
+
+            outTris[kept * 3 + 0] = i0;
+            outTris[kept * 3 + 1] = i1;
+            outTris[kept * 3 + 2] = i2;
+            outAreas[kept] = srcAreas[t];
+            kept++;
+        }
+
+        return (outTris, outAreas, kept);
+    }
+
+    private unsafe BuildSubTileResult BuildNavMeshTileSync(
+        TileGeometry geo, int[] tris, byte[] areas, int triCount,
+        int adtX, int adtY,
         float minX, float minZ, float maxX, float maxZ,
         float[] omVerts, float[] omRads, byte[] omDirs, byte[] omAreas, ushort[] omFlags)
     {
+        // vertCount is the ORIGINAL vertex count — the (possibly filtered) tris array
+        // still indexes into geo.Vertices, so the DLL sees the full vertex range even
+        // when triCount has been cut by the spatial filter.
         int vertCount = geo.VertexCount;
-        int triCount = geo.IndexCount / 3;
+        if (triCount <= 0 || tris.Length == 0)
+            return new BuildSubTileResult(RecastBuildResult.Empty, null);
 
         var p = new RecastBuildParams
         {
@@ -740,6 +943,10 @@ public sealed class MmapExtractorService
         float expandedMinZ = minZ - borderMeters;
         float expandedMaxZ = maxZ + borderMeters;
 
+        // Y bounds come from the FULL ADT geometry, not the filtered subset: the Detour
+        // tile header's bmin[1]/bmax[1] must cover the world's vertical extent so that
+        // pathfinding queries near the ground work regardless of which triangles were
+        // kept by the per-sub-tile spatial filter.
         float minY = float.MaxValue, maxYh = float.MinValue;
         for (int v = 1; v < geo.Vertices.Length; v += 3)
         {
@@ -749,8 +956,8 @@ public sealed class MmapExtractorService
         if (minY == float.MaxValue) { minY = 0; maxYh = 100f; }
 
         fixed (float* v = geo.Vertices)
-        fixed (int* i = geo.Indices)
-        fixed (byte* a = geo.Areas)
+        fixed (int* i = tris)
+        fixed (byte* a = areas)
         fixed (float* pOmVerts = omVerts.Length > 0 ? omVerts : new float[6])
         fixed (float* pOmRads  = omRads.Length  > 0 ? omRads  : new float[1])
         fixed (byte*  pOmDirs  = omDirs.Length  > 0 ? omDirs  : new byte[1])
@@ -776,24 +983,32 @@ public sealed class MmapExtractorService
             int outSize;
             int omCount = omVerts.Length / 6;
 
-            _logger.LogInformation("[Mmap] BuildTile DLL call: adt=({AX},{AY}) {Verts}v {Tris}t", adtX, adtY, vertCount, triCount);
-            if (!RecastNative.BuildTile(&p, v, vertCount, i, triCount, a,
+            _logger.LogDebug("[Mmap] BuildTile DLL call: adt=({AX},{AY}) {Verts}v {Tris}t", adtX, adtY, vertCount, triCount);
+            var status = RecastNative.BuildTileDetailed(&p, v, vertCount, i, triCount, a,
                 omCount > 0 ? pOmVerts : null,
                 omCount > 0 ? pOmRads  : null,
                 omCount > 0 ? pOmDirs  : null,
                 omCount > 0 ? pOmAreas : null,
                 omCount > 0 ? pOmFlags : null,
-                omCount, &outData, &outSize))
+                omCount, &outData, &outSize);
+
+            if (status == RecastBuildResult.Empty)
             {
-                _logger.LogWarning("[Mmap] BuildTile FAILED for adt=({AX},{AY})", adtX, adtY);
-                return null;
+                _logger.LogDebug("[Mmap] BuildTile empty/no polygons for adt=({AX},{AY})", adtX, adtY);
+                return new BuildSubTileResult(status, null);
             }
 
-            _logger.LogInformation("[Mmap] BuildTile DLL returned: adt=({AX},{AY}) size={Size}", adtX, adtY, outSize);
+            if (status != RecastBuildResult.Success)
+            {
+                _logger.LogWarning("[Mmap] BuildTile FAILED for adt=({AX},{AY}): {Status}", adtX, adtY, status);
+                return new BuildSubTileResult(status, null);
+            }
+
+            _logger.LogDebug("[Mmap] BuildTile DLL returned: adt=({AX},{AY}) size={Size}", adtX, adtY, outSize);
             if (outData == null || outSize <= 0)
             {
                 _logger.LogWarning("[Mmap] BuildTile returned empty for adt=({AX},{AY})", adtX, adtY);
-                return null;
+                return new BuildSubTileResult(RecastBuildResult.Empty, null);
             }
 
             var result = new byte[outSize];
@@ -803,7 +1018,7 @@ public sealed class MmapExtractorService
             }
 
             RecastNative.FreeBuffer(outData);
-            return result;
+            return new BuildSubTileResult(RecastBuildResult.Success, result);
         }
     }
 
