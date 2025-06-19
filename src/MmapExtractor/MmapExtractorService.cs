@@ -606,18 +606,47 @@ public sealed class MmapExtractorService
             return null;
 
         byte[] mask = File.ReadAllBytes(roadPath);
-        if (mask.Length != 256)
+        // New format: 4×4 sub-zones per chunk × 256 chunks = 4096 bits = 512 bytes.
+        // The previous format was 256 bytes (1 bit per chunk). A 256-byte file
+        // is treated as an all-or-nothing fallback: every sub-zone in every
+        // chunk is marked road. This way, old single-bit roadmasks keep working
+        // — the whole chunk becomes a road again, which matches the old
+        // behaviour instead of suddenly disappearing.
+        if (mask.Length != 512 && mask.Length != 256)
         {
-            _logger.LogWarning("[Mmap] Road mask is incomplete: {Path} ({Length}/256 bytes)", roadPath, mask.Length);
+            _logger.LogWarning("[Mmap] Road mask has unexpected size: {Path} ({Length} bytes, expected 512 or 256)",
+                roadPath, mask.Length);
             return null;
         }
 
-        int roadChunks = mask.Count(b => b != 0);
-        if (roadChunks > 0)
-            _logger.LogInformation("[Mmap] ADT ({TileX},{TileY}): loaded road mask {RoadChunks}/256 chunks",
-                tileX, tileY, roadChunks);
+        if (mask.Length == 256)
+        {
+            // Legacy fallback: expand to 512 bytes (every sub-zone in every
+            // chunk set to 1 wherever the legacy chunk bit was 1).
+            byte[] expanded = new byte[512];
+            for (int ci = 0; ci < 256; ci++)
+            {
+                if (mask[ci] != 0)
+                {
+                    // 4×4 sub-zones = 16 bits = 2 bytes
+                    expanded[ci * 2 + 0] = 0xFF;
+                    expanded[ci * 2 + 1] = 0xFF;
+                }
+            }
+            mask = expanded;
+        }
 
-        return roadChunks > 0 ? mask : null;
+        int roadSubZones = 0;
+        for (int i = 0; i < mask.Length; i++)
+        {
+            byte b = mask[i];
+            while (b != 0) { roadSubZones++; b &= (byte)(b - 1); }
+        }
+        if (roadSubZones > 0)
+            _logger.LogInformation("[Mmap] ADT ({TileX},{TileY}): loaded road mask {RoadSubZones}/4096 sub-zones",
+                tileX, tileY, roadSubZones);
+
+        return roadSubZones > 0 ? mask : null;
     }
 
     private static TileGeometry ExtrudeTileGeometry(uint mapId, int centerX, int centerY, List<(int X, int Y, AdtFile[] Tile)> tiles, byte[]? centerRoadMask)
@@ -679,9 +708,16 @@ public sealed class MmapExtractorService
                     }
                 }
 
-                byte areaType = adt.GetChunkAreaType(chunkIdx);
-                if (adjX == centerX && adjY == centerY && centerRoadMask != null && centerRoadMask[chunkIdx] != 0)
-                    areaType = 4; // NAV_ROAD
+                byte chunkAreaType = adt.GetChunkAreaType(chunkIdx);
+                // Per-sub-triangle road lookup. The road mask is 4×4 sub-zones
+                // per chunk packed into 16 bits (2 bytes) — same bit layout as
+                // the MCNK holes bitmask below. A sub-triangle (z, x) belongs
+                // to sub-zone (z/2, x/2). The bit is the same for all 4 sub-tris
+                // that share a sub-zone, so the bot follows the centerline of
+                // a 2×2-quad strip of road at the alpha map's natural resolution.
+                bool isCenterChunk = adjX == centerX && adjY == centerY;
+                int chunkMaskByteBase = chunkIdx * 2;
+                byte baseAreaType = chunkAreaType;
                 // MCNK.holes: WoW terrain holes are a 4×4 bitmask per chunk
                 // (16 bits → uint16 / lower 16 of uint32). Each bit covers a
                 // 2×2 zone of the chunk's 8×8 sub-triangles. The C++ map
@@ -703,6 +739,20 @@ public sealed class MmapExtractorService
                         int holeBit = (z / 2) * 4 + (x / 2);
                         if (chunkHoles != 0 && (chunkHoles & (1u << holeBit)) != 0)
                             continue; // cave entrance / pit: no terrain tris here
+
+                        // Road mask: same 4×4 layout as holes. Bit set at
+                        // (z/2, x/2) → sub-triangle inherits NAV_ROAD area.
+                        // This is the per-sub-triangle precision that lets
+                        // the bot path along the center of a road strip
+                        // instead of the entire chunk (33.33 yards wide).
+                        byte areaType = baseAreaType;
+                        if (isCenterChunk && centerRoadMask != null)
+                        {
+                            int roadByte = chunkMaskByteBase + (holeBit >> 3);
+                            int roadBit  = holeBit & 7;
+                            if ((centerRoadMask[roadByte] & (1 << roadBit)) != 0)
+                                areaType = 4; // NAV_ROAD
+                        }
 
                         int v9_00 = vertexOffset + z * 9 + x;
                         int v9_01 = vertexOffset + z * 9 + x + 1;
