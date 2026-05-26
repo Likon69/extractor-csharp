@@ -70,7 +70,7 @@ public sealed class MapExtractorService
             progress?.Report(new TileProgressEvent(
                 (int)mapId, tileX, tileY, TileStatus.Processing, ExtractionPhase.Map));
 
-            bool success = await ProcessTileAsync(mapId, tileX, tileY, ct);
+            bool success = await ProcessTileAsync(mapId, mapName, tileX, tileY, ct);
 
             progress?.Report(new TileProgressEvent(
                 (int)mapId, tileX, tileY,
@@ -89,12 +89,12 @@ public sealed class MapExtractorService
 
     private async Task<bool> ProcessTileAsync(
         uint mapId,
+        string mapName,
         int tileX,
         int tileY,
         CancellationToken ct)
     {
-        string mapDir = WowConstants.GetMapDirectory(mapId);
-        string adtPath = $"World\\Maps\\{mapDir}\\{mapDir}_{tileX:D2}_{tileY:D2}.adt";
+        string adtPath = $"World\\Maps\\{mapName}\\{mapName}_{tileX:D2}_{tileY:D2}.adt";
 
         var result = await _adtParser.ParseAsync(adtPath, mapId, tileX, tileY, ct);
 
@@ -117,7 +117,7 @@ public sealed class MapExtractorService
         }
     }
 
-    public void ClearCache()
+    internal void ClearCache()
     {
         _adtParser.ClearCache();
     }

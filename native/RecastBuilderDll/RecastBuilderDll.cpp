@@ -40,7 +40,7 @@ bool BuildTile(
 
     if (!rcCreateHeightfield(ctx, *hf, gridWidth, gridHeight, bmin, bmax, params->CellSize, params->CellHeight))
     {
-        rcFreeHeightfield(hf);
+        rcFreeHeightField(hf);
         return false;
     }
 
@@ -56,7 +56,7 @@ bool BuildTile(
     if (!rcRasterizeTriangles(ctx, verts, vertCount, tris, areas, triCount, *hf, 1))
     {
         if (allocAreas) delete[] areas;
-        rcFreeHeightfield(hf);
+        rcFreeHeightField(hf);
         return false;
     }
 
@@ -69,34 +69,37 @@ bool BuildTile(
     rcCompactHeightfield* chf = rcAllocCompactHeightfield();
     if (!chf)
     {
-        rcFreeHeightfield(hf);
+        rcFreeHeightField(hf);
         return false;
     }
 
     if (!rcBuildCompactHeightfield(ctx, params->WalkableHeight, params->WalkableClimb, *hf, *chf))
     {
         rcFreeCompactHeightfield(chf);
-        rcFreeHeightfield(hf);
+        rcFreeHeightField(hf);
         return false;
     }
-
-    rcFreeHeightfield(hf);
 
     if (!rcErodeWalkableArea(ctx, params->WalkableRadius, *chf))
     {
         rcFreeCompactHeightfield(chf);
+        rcFreeHeightField(hf);
         return false;
     }
+
+    rcFreeHeightField(hf);
 
     if (!rcBuildDistanceField(ctx, *chf))
     {
         rcFreeCompactHeightfield(chf);
+        rcFreeHeightField(hf);
         return false;
     }
 
     if (!rcBuildRegions(ctx, *chf, 0, (int)params->MinRegionArea, (int)params->MergeRegionArea))
     {
         rcFreeCompactHeightfield(chf);
+        rcFreeHeightField(hf);
         return false;
     }
 
@@ -104,10 +107,11 @@ bool BuildTile(
     if (!cset)
     {
         rcFreeCompactHeightfield(chf);
+        rcFreeHeightField(hf);
         return false;
     }
 
-    float maxEdgeLen = 0;
+    float maxEdgeLen = 41; // spec: VERTEX_PER_TILE + 1
     float maxError = params->MaxSimplificationError > 0 ? params->MaxSimplificationError : 8.0f;
     int buildFlags = RC_CONTOUR_TESS_WALL_EDGES;
 
@@ -115,16 +119,20 @@ bool BuildTile(
     {
         rcFreeContourSet(cset);
         rcFreeCompactHeightfield(chf);
+
+        rcFreeHeightField(hf);
         return false;
     }
 
     int nvp = params->MaxVertsPerPoly > 0 ? params->MaxVertsPerPoly : 6;
+
 
     rcPolyMesh* pmesh = rcAllocPolyMesh();
     if (!pmesh)
     {
         rcFreeContourSet(cset);
         rcFreeCompactHeightfield(chf);
+        rcFreeHeightField(hf);
         return false;
     }
 
@@ -133,6 +141,7 @@ bool BuildTile(
         rcFreePolyMesh(pmesh);
         rcFreeContourSet(cset);
         rcFreeCompactHeightfield(chf);
+        rcFreeHeightField(hf);
         return false;
     }
 
@@ -142,20 +151,25 @@ bool BuildTile(
         rcFreePolyMesh(pmesh);
         rcFreeContourSet(cset);
         rcFreeCompactHeightfield(chf);
+        rcFreeHeightField(hf);
         return false;
     }
 
-    if (!rcBuildPolyMeshDetail(ctx, *pmesh, *chf, 4.0f, 4.0f, *dmesh))
+    float detailDist = params->CellSize * 16.0f;  // spec: 4.848f = 0.303030 x 16
+    float detailMaxError = params->CellHeight * 1.0f;   // spec: 0.2f = 0.2 x 1
+    if (!rcBuildPolyMeshDetail(ctx, *pmesh, *chf, detailDist, detailMaxError, *dmesh))
     {
         rcFreePolyMeshDetail(dmesh);
         rcFreePolyMesh(pmesh);
         rcFreeContourSet(cset);
         rcFreeCompactHeightfield(chf);
+        rcFreeHeightField(hf);
         return false;
     }
 
     rcFreeContourSet(cset);
     rcFreeCompactHeightfield(chf);
+    rcFreeHeightField(hf);
 
     for (int i = 0; i < pmesh->npolys; i++)
     {
@@ -164,8 +178,7 @@ bool BuildTile(
         if (pmesh->areas[i] == RC_WALKABLE_AREA)
             pmesh->areas[i] = 1;
         
-        // Default to NAV_GROUND (0x01), NAV_WATER = 0x04 for liquid areas
-        pmesh->flags[i] = 1;
+        pmesh->flags[i] = (pmesh->areas[i] == 2) ? 0x04 : 0x01; // NAV_WATER(2)=0x04 swim, else NAV_GROUND=0x01
     }
 
     dtNavMeshCreateParams navParams;
@@ -192,7 +205,7 @@ bool BuildTile(
 
     // World units (not cell-based)
     navParams.walkableHeight = params->WalkableHeight * params->CellHeight;
-    navParams.walkableRadius = params->WalkableRadius * params->CellSize;
+    navParams.walkableRadius = 0.400f;  // spec: hardcoded exact HB value, NOT walkableRadius * cellSize
     navParams.walkableClimb = params->WalkableClimb * params->CellHeight;
     navParams.buildBvTree = true;
 
@@ -203,6 +216,9 @@ bool BuildTile(
     {
         rcFreePolyMeshDetail(dmesh);
         rcFreePolyMesh(pmesh);
+        rcFreeContourSet(cset);
+        rcFreeCompactHeightfield(chf);
+        rcFreeHeightField(hf);
         return false;
     }
 

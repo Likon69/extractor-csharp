@@ -1,7 +1,10 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Input;
 using Microsoft.Extensions.Logging;
 using Microsoft.Win32;
@@ -33,21 +36,27 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ICommand StopCommand { get; }
     public ICommand BrowseWowCommand { get; }
     public ICommand BrowseOutputCommand { get; }
+    public ICommand BrowseGoSpawnsCommand { get; }
+    public ICommand BrowseOffMeshCommand { get; }
 
-    public string[] PhaseNames => new[] { "Toutes", "Map", "Vmap", "Road", "Mmap" };
+    public string SelectedLocale { get; set; } = "enUS";
     public string[] Locales => new[] { "enUS", "enGB", "deDE", "frFR", "esES", "ruRU" };
 
-    public string SelectedPhase { get; set; } = "Toutes";
-    public string SelectedLocale { get; set; } = "enUS";
-
     private string _wowClientPath = @"C:\World of Warcraft";
-    public string WowClientPath { get => _wowClientPath; set { _wowClientPath = value; OnPropertyChanged(); } }
+    public string WowClientPath
+    {
+        get => _wowClientPath;
+        set { _wowClientPath = value; OnPropertyChanged(); _ = TryReloadMapListAsync(); }
+    }
 
-    private string _outputPath = @"D:\wow-data\output";
+    private string _outputPath = Path.Combine(AppContext.BaseDirectory, "output");
     public string OutputPath { get => _outputPath; set { _outputPath = value; OnPropertyChanged(); } }
 
-    private string _goSpawnsPath = "gameobject_spawns.bin";
+    private string _goSpawnsPath = Path.Combine(AppContext.BaseDirectory, "gameobject_spawns.bin");
     public string GoSpawnsPath { get => _goSpawnsPath; set { _goSpawnsPath = value; OnPropertyChanged(); } }
+
+    private string _offMeshPath = Path.Combine(AppContext.BaseDirectory, "offmesh.txt");
+    public string OffMeshPath { get => _offMeshPath; set { _offMeshPath = value; OnPropertyChanged(); } }
 
     public int ThreadCount { get; set; } = 4;
 
@@ -56,18 +65,63 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool CanStart => !IsExtracting;
     public bool CanStop => IsExtracting;
 
-    public int ProcessedTiles { get; private set; }
+    private int _processedTiles;
+    public int ProcessedTiles
+    {
+        get => _processedTiles;
+        private set { _processedTiles = value; OnPropertyChanged(); }
+    }
+
+    private int _totalTiles;
+    public int TotalTiles
+    {
+        get => _totalTiles;
+        private set { _totalTiles = value; OnPropertyChanged(); }
+    }
+
+    private double _progress;
+    public double Progress
+    {
+        get => _progress;
+        private set { _progress = value; OnPropertyChanged(); }
+    }
     public string StatusMessage { get; private set; } = "Ready";
 
     public ObservableCollection<PhaseItem> Phases { get; } = new()
     {
         new PhaseItem { Name = "Map", IsEnabled = true },
         new PhaseItem { Name = "Vmap", IsEnabled = true },
-        new PhaseItem { Name = "Road", IsEnabled = false },
+        new PhaseItem { Name = "Road", IsEnabled = true },
         new PhaseItem { Name = "Mmap", IsEnabled = true }
     };
 
     public ObservableCollection<MapSelectionItem> SelectedMaps { get; } = new();
+
+    // F2: map list selection
+    public bool HasMaps => SelectedMaps.Count > 0;
+
+    private bool _selectAllMaps = true;
+    public bool SelectAllMaps
+    {
+        get => _selectAllMaps;
+        set
+        {
+            _selectAllMaps = value;
+            OnPropertyChanged();
+            foreach (var m in SelectedMaps)
+                m.IsSelected = value;
+        }
+    }
+
+    private void RefreshMapList()
+    {
+        // Select all by default after loading
+        foreach (var m in SelectedMaps)
+            m.IsSelected = true;
+        _selectAllMaps = true;
+        OnPropertyChanged(nameof(SelectAllMaps));
+        OnPropertyChanged(nameof(HasMaps));
+    }
 
     public float CellSize { get; set; } = 0.303030f;
     public float CellHeight { get; set; } = 0.2f;
@@ -75,6 +129,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public int WalkableHeight { get; set; } = 11;
     public int WalkableRadius { get; set; } = 2;
     public int WalkableClimb { get; set; } = 5;
+
+    private bool _bigBaseUnit;
+    public bool BigBaseUnit { get => _bigBaseUnit; set { _bigBaseUnit = value; OnPropertyChanged(); } }
 
     public ObservableCollection<LogMessage> LogMessages { get; } = new();
 
@@ -88,7 +145,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         StopCommand = new RelayCommand(_ => StopExtraction(), _ => CanStop);
         BrowseWowCommand = new RelayCommand(_ => BrowsePath(true));
         BrowseOutputCommand = new RelayCommand(_ => BrowsePath(false));
-
+        BrowseGoSpawnsCommand = new RelayCommand(_ => BrowseGoSpawns());
+        BrowseOffMeshCommand  = new RelayCommand(_ => BrowseOffMesh());
         LoadConfig();
     }
 
@@ -108,6 +166,82 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    private void BrowseGoSpawns()
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = "Select gameobject_spawns.bin",
+            Filter = "BIN files (*.bin)|*.bin|All files (*.*)|*.*",
+            FileName = string.IsNullOrEmpty(GoSpawnsPath) ? "" : GoSpawnsPath
+        };
+        if (dialog.ShowDialog() == true)
+            GoSpawnsPath = dialog.FileName;
+    }
+
+    private void BrowseOffMesh()
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = "Select OffMesh File",
+            Filter = "TXT files (*.txt)|*.txt|All files (*.*)|*.*",
+            FileName = string.IsNullOrEmpty(OffMeshPath) ? "" : OffMeshPath
+        };
+        if (dialog.ShowDialog() == true)
+            OffMeshPath = dialog.FileName;
+    }
+
+    private async Task TryReloadMapListAsync()
+    {
+        if (string.IsNullOrEmpty(_wowClientPath) || !Directory.Exists(_wowClientPath))
+            return;
+
+        var path  = _wowClientPath;
+        var locale = SelectedLocale;
+        var sel   = SelectedMaps.Where(m => m.IsSelected).Select(m => m.MapId).ToHashSet();
+
+        AddLog($"Chargement des cartes depuis {path}...");
+
+        List<MapSelectionItem> loaded;
+        try
+        {
+            loaded = await Task.Run(() =>
+            {
+                using var archives = MpqArchiveCollection.FromWoWDirectory(path, locale, _loggerFactory);
+
+                if (!archives.TryReadFile(@"DBFilesClient\Map.dbc", out var data))
+                    return new List<MapSelectionItem>();
+
+                var reader = DbcReader<MapDbcRow>.Parse(data.Span);
+                var result = new List<MapSelectionItem>();
+                foreach (var row in reader.Rows)
+                {
+                    string dir = reader.GetString(row, 1);
+                    if (!string.IsNullOrEmpty(dir))
+                        result.Add(new MapSelectionItem
+                        {
+                            MapId     = (int)row.Id,
+                            Name      = dir,
+                            MapType   = reader.GetInt32(row, 2),
+                            IsSelected = sel.Count == 0 || sel.Contains((int)row.Id)
+                        });
+                }
+                return result;
+            });
+        }
+        catch (Exception ex)
+        {
+            AddLog($"Erreur MPQ [{ex.GetType().Name}]: {ex.Message}", LogLevel.Error);
+            return;
+        }
+
+        SelectedMaps.Clear();
+        foreach (var item in loaded)
+            SelectedMaps.Add(item);
+
+        AddLog($"{loaded.Count} cartes chargées depuis Map.dbc");
+        RefreshMapList();
+    }
+
     public void LoadConfig()
     {
         var config = ConfigFileManager.Load(_configPath);
@@ -115,21 +249,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (config == null)
         {
             WowClientPath = @"C:\World of Warcraft";
-            OutputPath = @"D:\wow-data\output";
-            GoSpawnsPath = "gameobject_spawns.bin";
+            OutputPath = Path.Combine(AppContext.BaseDirectory, "output");
+            GoSpawnsPath = Path.Combine(AppContext.BaseDirectory, "gameobject_spawns.bin");
             ThreadCount = 4;
-            SelectedMaps.Clear();
-            SelectedMaps.Add(new MapSelectionItem { MapId = 0, Name = "Azeroth", IsSelected = true });
-            SelectedMaps.Add(new MapSelectionItem { MapId = 571, Name = "Northrend", IsSelected = true });
             return;
         }
 
-        WowClientPath = config?.WowClientPath ?? string.Empty;
-        OutputPath = config?.OutputPath ?? string.Empty;
-        GoSpawnsPath = config?.GoSpawnsPath ?? string.Empty;
-        ThreadCount = config.Threads > 0 ? config.Threads : 4;
+        WowClientPath = config.WowClientPath ?? string.Empty;
+        OutputPath    = config.OutputPath    ?? string.Empty;
+        GoSpawnsPath  = config.GoSpawnsPath  ?? Path.Combine(AppContext.BaseDirectory, "gameobject_spawns.bin");
+        OffMeshPath   = config.OffMeshPath   ?? Path.Combine(AppContext.BaseDirectory, "offmesh.txt");
+        ThreadCount   = config.Threads > 0   ? config.Threads : 4;
+        BigBaseUnit   = config.BigBaseUnit;
 
-        if (config?.RecastConfig is { } r)
+        if (config.RecastConfig is { } r)
         {
             CellSize = r.CellSize;
             CellHeight = r.CellHeight;
@@ -139,43 +272,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             WalkableClimb = r.WalkableClimb;
         }
 
-        SelectedLocale = config?.Locale ?? "enUS";
-        LoadMapSelection(config);
-    }
-
-    private void LoadMapSelection(ExtractorConfig? config)
-    {
-        var selectedIds = config?.SelectedMapIds != null
-            ? new HashSet<int>(config.SelectedMapIds)
-            : new HashSet<int> { 0, 571 };
-
-        if (_archives != null && _archives.TryReadFile(@"DBFilesClient\Map.dbc", out var mapDbcData))
-        {
-            try
-            {
-                var reader = DbcReader<MapDbcRow>.Parse(mapDbcData.Span);
-                foreach (var row in reader.Rows)
-                {
-                    string dir = reader.GetString(row, 1);
-                    if (!string.IsNullOrEmpty(dir))
-                        SelectedMaps.Add(new MapSelectionItem
-                        {
-                            MapId = (int)row.Id,
-                            Name = dir,
-                            IsSelected = selectedIds.Contains((int)row.Id)
-                        });
-                }
-            }
-            catch { }
-        }
-
-        if (SelectedMaps.Count == 0)
-        {
-            SelectedMaps.Add(new MapSelectionItem { MapId = 0, Name = "Azeroth", IsSelected = selectedIds.Contains(0) });
-            SelectedMaps.Add(new MapSelectionItem { MapId = 1, Name = "Kalimdor", IsSelected = selectedIds.Contains(1) });
-            SelectedMaps.Add(new MapSelectionItem { MapId = 530, Name = "Outland", IsSelected = selectedIds.Contains(530) });
-            SelectedMaps.Add(new MapSelectionItem { MapId = 571, Name = "Northrend", IsSelected = selectedIds.Contains(571) });
-        }
+        SelectedLocale = config.Locale ?? "enUS";
+        // TryReloadMapList is called by the WowClientPath setter above.
+        // Always start with all maps selected (dropdown index 0).
     }
 
     public async Task StartExtractionAsync()
@@ -192,7 +291,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             var enabledPhases = Phases.Where(p => p.IsEnabled).Select(p => p.Name).ToList();
             string mapDir = Path.Combine(OutputPath, "maps");
             string vmapDir = Path.Combine(OutputPath, "vmaps");
-            string roadDir = Path.Combine(OutputPath, "road");
+            string roadDir = Path.Combine(OutputPath, "roadmaps");
             string mmapDir = Path.Combine(OutputPath, "mmaps");
 
             Directory.CreateDirectory(mapDir);
@@ -200,20 +299,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
             Directory.CreateDirectory(roadDir);
             Directory.CreateDirectory(mmapDir);
 
-            _archives = MpqArchiveCollection.FromWoWDirectory(WowClientPath, SelectedLocale, _loggerFactory);
-
-            if (SelectedMaps.Count <= 4)
-                LoadMapSelection(new ExtractorConfig { SelectedMapIds = maps.Select(m => m.MapId).ToArray() });
+            _archives = await Task.Run(() =>
+                MpqArchiveCollection.FromWoWDirectory(WowClientPath, SelectedLocale, _loggerFactory));
 
             var progress = new Progress<TileProgressEvent>(e => _tileGrid.OnTileProgress(e));
             AddLog($"Starting extraction: {maps.Count} maps, {enabledPhases.Count} phases, {ThreadCount} threads");
 
             int processed = 0;
 
+            // Estimate total tiles for progress (rough: each map has at most 4096 tiles)
+            TotalTiles = maps.Sum(m => Math.Max(1, 4096 / maps.Count)) * enabledPhases.Count;
             foreach (var map in maps)
             {
                 _cts.Token.ThrowIfCancellationRequested();
-                string mapName = WowConstants.GetMapDirectory((uint)map.MapId);
+                string mapName = map.Name;
 
                 if (enabledPhases.Contains("Map"))
                 {
@@ -221,6 +320,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     int tiles = await new MapExtractorService(_archives, _loggerFactory, mapDir)
                         .ExtractMapAsync((uint)map.MapId, mapName, progress, _cts.Token);
                     processed += tiles;
+                    ProcessedTiles = processed;
+                    Progress = TotalTiles > 0 ? processed * 100.0 / TotalTiles : 0;
                 }
                 if (enabledPhases.Contains("Vmap"))
                 {
@@ -228,6 +329,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     int tiles = await new VmapExtractorService(_archives, _loggerFactory, vmapDir)
                         .ExtractMapAsync((uint)map.MapId, mapName, progress, _cts.Token);
                     processed += tiles;
+                    ProcessedTiles = processed;
+                    Progress = TotalTiles > 0 ? processed * 100.0 / TotalTiles : 0;
                 }
                 if (enabledPhases.Contains("Road"))
                 {
@@ -235,18 +338,21 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     int tiles = await new RoadExtractorService(_archives, _loggerFactory, roadDir)
                         .ExtractMapAsync((uint)map.MapId, mapName, progress, _cts.Token);
                     processed += tiles;
+                    ProcessedTiles = processed;
+                    Progress = TotalTiles > 0 ? processed * 100.0 / TotalTiles : 0;
                 }
                 if (enabledPhases.Contains("Mmap"))
                 {
                     AddLog($"[Mmap] Extracting {mapName}...");
                     var recastConfig = new RecastConfig(CellSize, CellHeight, WalkableSlopeAngle, WalkableHeight, WalkableRadius, WalkableClimb);
-                    int tiles = await new MmapExtractorService(_archives, _loggerFactory, mmapDir, recastConfig, ThreadCount, GoSpawnsPath)
+                    int tiles = await new MmapExtractorService(_archives, _loggerFactory, mmapDir, recastConfig, ThreadCount, GoSpawnsPath, OffMeshPath)
                         .ExtractMapAsync((uint)map.MapId, mapName, progress, _cts.Token);
                     processed += tiles;
+                    ProcessedTiles = processed;
+                    Progress = TotalTiles > 0 ? processed * 100.0 / TotalTiles : 0;
                 }
-
-                ProcessedTiles = processed;
             }
+            Progress = 100;
 
             AddLog($"Extraction complete. {processed} tiles processed.");
         }
@@ -256,7 +362,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
         catch (Exception ex)
         {
-            AddLog($"Error: {ex.Message}");
+            AddLog($"Error [{ex.GetType().Name}]: {ex.Message}", LogLevel.Error);
+            AddLog(ex.StackTrace ?? "(no stack trace)", LogLevel.Error);
         }
         finally
         {
@@ -266,7 +373,30 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    public void StopExtraction() { _cts?.Cancel(); StatusMessage = "Stopping..."; }
+
+    public void SaveConfig()
+    {
+        var config = new ExtractorConfig
+        {
+            WowClientPath = WowClientPath,
+            OutputPath = OutputPath,
+            GoSpawnsPath = GoSpawnsPath,
+            OffMeshPath = OffMeshPath,
+            Locale = SelectedLocale,
+            EnabledPhases = Phases.Where(p => p.IsEnabled).Select(p => p.Name).ToArray(),
+            Maps = SelectedMaps.Where(m => m.IsSelected).Select(m => m.MapId).ToArray(),
+            Threads = ThreadCount,
+            BigBaseUnit = BigBaseUnit,
+            RecastConfig = new RecastConfig(CellSize, CellHeight, WalkableSlopeAngle, WalkableHeight, WalkableRadius, WalkableClimb)
+        };
+        ConfigFileManager.Save(_configPath, config);
+    }
+    public void StopExtraction()
+    {
+        _cts?.Cancel();
+        _tileGrid?.ResetAllTiles();
+        StatusMessage = "Stopping...";
+    }
 
     public void AddLog(string message, Mel.LogLevel level = Mel.LogLevel.Information)
     {
@@ -293,6 +423,7 @@ public sealed class MapSelectionItem : INotifyPropertyChanged
 {
     public int MapId { get; init; }
     public string Name { get; init; } = "";
+    public int MapType { get; init; }
     private bool _isSelected;
     public bool IsSelected { get => _isSelected; set { _isSelected = value; OnPropertyChanged(); } }
     public event PropertyChangedEventHandler? PropertyChanged;

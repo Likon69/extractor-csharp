@@ -113,7 +113,8 @@ public sealed class MpqArchive : IArchiveReader
     {
         ThrowIfDisposed();
 
-        if (!StormLib.SFileFindFirstFile(_handle, pattern, out SFileFindData findData, IntPtr.Zero, out IntPtr findHandle))
+        IntPtr findHandle = StormLib.SFileFindFirstFile(_handle, pattern, out SFileFindData findData, IntPtr.Zero);
+        if (findHandle == new IntPtr(-1))
         {
             yield break;
         }

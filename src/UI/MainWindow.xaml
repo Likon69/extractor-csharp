@@ -16,13 +16,16 @@
         </Grid.RowDefinitions>
 
         <!-- Toolbar -->
-        <Border Grid.Row="0" Background="#F0F0F0" Padding="8" Margin="0,0,0,8">
+        <Border Grid.Row="0" Background="{StaticResource PanelBackground}" Padding="8" Margin="0,0,0,8">
             <StackPanel Orientation="Horizontal">
                 <Button Content="▶ Démarrer" Command="{Binding StartCommand}" IsEnabled="{Binding CanStart}"/>
                 <Button Content="■ Stop" Command="{Binding StopCommand}" IsEnabled="{Binding CanStop}"/>
                 <Separator Width="20"/>
                 <Label Content="Phase:" VerticalAlignment="Center"/>
-                <ComboBox Width="120" ItemsSource="{Binding PhaseNames}" SelectedItem="{Binding SelectedPhase}"/>
+                <CheckBox Content="Map" IsChecked="{Binding Phases[0].IsEnabled}" VerticalAlignment="Center" Margin="4,0"/>
+                <CheckBox Content="Vmap" IsChecked="{Binding Phases[1].IsEnabled}" VerticalAlignment="Center" Margin="4,0"/>
+                <CheckBox Content="Road" IsChecked="{Binding Phases[2].IsEnabled}" VerticalAlignment="Center" Margin="4,0"/>
+                <CheckBox Content="Mmap" IsChecked="{Binding Phases[3].IsEnabled}" VerticalAlignment="Center" Margin="4,0"/>
             </StackPanel>
         </Border>
 
@@ -38,19 +41,34 @@
                 <ScrollViewer>
                     <StackPanel Margin="8">
                         <!-- Maps section -->
-                        <TextBlock Text="CARTES" FontWeight="Bold" Margin="0,0,0,8"/>
-                        <ItemsControl ItemsSource="{Binding SelectedMaps}">
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate>
-                                    <CheckBox IsChecked="{Binding IsSelected}" Margin="0,2">
-                                        <StackPanel Orientation="Horizontal">
-                                            <TextBlock Text="{Binding MapId}" Width="40"/>
-                                            <TextBlock Text="{Binding MapName}"/>
-                                        </StackPanel>
-                                    </CheckBox>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
+                        <TextBlock Text="CARTES" FontWeight="Bold" Margin="0,0,0,4"/>
+                        <!-- "Toutes" visible seulement si des maps sont chargées -->
+                        <CheckBox Content="Toutes les cartes"
+                                  IsChecked="{Binding SelectAllMaps}"
+                                  Margin="0,0,0,4"
+                                  Visibility="{Binding HasMaps, Converter={StaticResource BoolToVisibilityConverter}}"/>
+                        <!-- Liste individuelle avec checkboxes -->
+                        <Border MaxHeight="200" BorderBrush="#555" BorderThickness="1" Margin="0,0,0,4"
+                                Visibility="{Binding HasMaps, Converter={StaticResource BoolToVisibilityConverter}}">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <ItemsControl ItemsSource="{Binding SelectedMaps}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <CheckBox IsChecked="{Binding IsSelected}" Margin="4,1">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="{Binding MapId}" Width="38" Foreground="#999" FontSize="11"/>
+                                                    <TextBlock Text="{Binding Name}"/>
+                                                </StackPanel>
+                                            </CheckBox>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </ScrollViewer>
+                        </Border>
+                        <!-- Hint quand aucune map (chemin WoW non défini) -->
+                        <TextBlock Text="→ Définir le chemin WoW pour charger les maps"
+                                   Foreground="#888" FontStyle="Italic" FontSize="11" Margin="0,0,0,8"
+                                   Visibility="{Binding HasMaps, Converter={StaticResource InverseBoolToVisibilityConverter}}"/>
 
                         <Separator Margin="0,16"/>
 
@@ -62,6 +80,9 @@
                                 <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
                             <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
@@ -87,6 +108,15 @@
 
                             <Label Grid.Row="5" Grid.Column="0" Content="Locale:"/>
                             <ComboBox Grid.Row="5" Grid.Column="1" ItemsSource="{Binding Locales}" SelectedItem="{Binding SelectedLocale}"/>
+
+                            <Label Grid.Row="6" Grid.Column="0" Content="Height:"/>
+                            <TextBox Grid.Row="6" Grid.Column="1" Text="{Binding WalkableHeight, UpdateSourceTrigger=PropertyChanged}"/>
+
+                            <Label Grid.Row="7" Grid.Column="0" Content="Radius:"/>
+                            <TextBox Grid.Row="7" Grid.Column="1" Text="{Binding WalkableRadius, UpdateSourceTrigger=PropertyChanged}"/>
+
+                            <Label Grid.Row="8" Grid.Column="0" Content="Climb:"/>
+                            <TextBox Grid.Row="8" Grid.Column="1" Text="{Binding WalkableClimb, UpdateSourceTrigger=PropertyChanged}"/>
                         </Grid>
 
                         <Separator Margin="0,16"/>
@@ -112,12 +142,32 @@
                             <TextBox Grid.Column="0" Text="{Binding OutputPath, UpdateSourceTrigger=PropertyChanged}"/>
                             <Button Grid.Column="1" Content="..." Width="30" Command="{Binding BrowseOutputCommand}"/>
                         </Grid>
+
+                        <Label Content="GO Spawns:"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBox Grid.Column="0" Text="{Binding GoSpawnsPath, UpdateSourceTrigger=PropertyChanged}"/>
+                            <Button Grid.Column="1" Content="..." Width="30" Command="{Binding BrowseGoSpawnsCommand}"/>
+                        </Grid>
+
+                        <Label Content="OffMesh:"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBox Grid.Column="0" Text="{Binding OffMeshPath, UpdateSourceTrigger=PropertyChanged}"/>
+                            <Button Grid.Column="1" Content="..." Width="30" Command="{Binding BrowseOffMeshCommand}"/>
+                        </Grid>
                     </StackPanel>
                 </ScrollViewer>
             </Border>
 
             <!-- Right panel: Map grid -->
-            <Border Grid.Column="1" BorderBrush="#CCC" BorderThickness="1">
+            <Border Grid.Column="1" BorderBrush="#CCC" BorderThickness="1" Background="{StaticResource PanelBackground}">
                 <ctrl:MapGridControl ViewModel="{Binding TileGrid}"/>
             </Border>
         </Grid>
@@ -128,26 +178,29 @@
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
-            <ProgressBar Grid.Column="0" Value="{Binding Progress}" Maximum="100" Height="20"/>
+            <ProgressBar Grid.Column="0" Value="{Binding Progress, Mode=OneWay}" Maximum="100" Height="20"/>
             <TextBlock Grid.Column="1" Margin="8,0,0,0">
-                <Run Text="{Binding ProcessedTiles}"/>
+                <Run Text="{Binding ProcessedTiles, Mode=OneWay}"/>
                 <Run Text="/"/>
-                <Run Text="{Binding TotalTiles}"/>
+                <Run Text="{Binding TotalTiles, Mode=OneWay}"/>
                 <Run Text=" tiles"/>
             </TextBlock>
         </Grid>
 
-        <!-- Log output -->
-        <Border Grid.Row="3" BorderBrush="#CCC" BorderThickness="1" Background="#1E1E1E">
-            <ScrollViewer>
-                <ItemsControl ItemsSource="{Binding LogMessages}" Padding="8">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <TextBlock Text="{Binding Text}" Foreground="{Binding Color}" FontFamily="Consolas" FontSize="11"/>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-            </ScrollViewer>
+        <!-- Log output (selectable + copyable via Ctrl+C / Ctrl+A) -->
+        <Border Grid.Row="3" BorderBrush="#3F3F46" BorderThickness="1" Background="#1E1E1E">
+            <TextBox x:Name="LogTextBox"
+                     IsReadOnly="True"
+                     Background="Transparent"
+                     Foreground="#D4D4D4"
+                     BorderThickness="0"
+                     FontFamily="Consolas"
+                     FontSize="11"
+                     Padding="8"
+                     VerticalScrollBarVisibility="Auto"
+                     HorizontalScrollBarVisibility="Disabled"
+                     TextWrapping="Wrap"
+                     IsReadOnlyCaretVisible="False"/>
         </Border>
     </Grid>
 </Window>

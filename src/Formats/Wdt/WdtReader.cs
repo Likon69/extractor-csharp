@@ -29,27 +29,33 @@ public sealed class WdtReader
     {
         var reader = new SpanReader(data);
 
-        uint magic = reader.ReadUInt32();
-        if (magic == MagicBytes.Mver)
+        // WDT chunk layout (WotLK): MVER → MPHD → MAIN → [MWMO] → [MODF]
+        // Parse in a generic chunk loop: read magic+size, handle known chunks.
+        while (!reader.EndOfData && reader.Remaining >= 8)
         {
-            reader.Skip(4);
+            uint chunkMagic = reader.ReadUInt32();
+            uint chunkSize  = reader.ReadUInt32();
+
+            if (chunkMagic == MagicBytes.Main)
+            {
+                // 64×64 = 4096 entries of 8 bytes each (flags + asyncId)
+                for (int i = 0; i < 4096 && reader.Remaining >= 8; i++)
+                {
+                    uint flags   = reader.ReadUInt32();
+                    uint asyncId = reader.ReadUInt32();
+                    _tileExists[i] = (flags & 1) != 0;
+                }
+                return true;
+            }
+
+            // Skip any other chunk (MVER, MPHD, MWMO, MODF, …)
+            if (chunkSize > 0 && reader.Remaining >= (int)chunkSize)
+                reader.Skip((int)chunkSize);
+            else if (chunkSize > 0)
+                break; // truncated file
         }
 
-        magic = reader.ReadUInt32();
-        if (magic != MagicBytes.Main)
-            return false;
-
-        uint chunkSize = reader.ReadUInt32();
-
-        for (int i = 0; i < 4096; i++)
-        {
-            uint flags = reader.ReadUInt32();
-            uint asyncId = reader.ReadUInt32();
-
-            _tileExists[i] = (flags & 1) != 0;
-        }
-
-        return true;
+        return false; // MAIN chunk not found
     }
 
     public bool HasTile(int tileX, int tileY)

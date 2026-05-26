@@ -22,6 +22,7 @@ public sealed class MmapExtractorService
     private readonly RecastConfig _recastConfig;
     private readonly int _maxDegreeOfParallelism;
     private readonly GoSpawn[] _goSpawns;
+    private readonly string? _offMeshPath;   // reserved for future off-mesh connections
 
     public MmapExtractorService(
         IArchiveReader archive,
@@ -29,7 +30,8 @@ public sealed class MmapExtractorService
         string outputDir,
         RecastConfig recastConfig,
         int maxDegreeOfParallelism = 1,
-        string? goSpawnsPath = null)
+        string? goSpawnsPath = null,
+        string? offMeshPath = null)
     {
         _archive = archive;
         _logger = loggerFactory.CreateLogger<MmapExtractorService>();
@@ -41,6 +43,7 @@ public sealed class MmapExtractorService
         _goSpawns = !string.IsNullOrEmpty(goSpawnsPath)
             ? GoSpawnsReader.Read(goSpawnsPath)
             : Array.Empty<GoSpawn>();
+        _offMeshPath = offMeshPath;
         if (!Directory.Exists(outputDir))
             Directory.CreateDirectory(outputDir);
     }
@@ -75,7 +78,7 @@ public sealed class MmapExtractorService
             progress?.Report(new TileProgressEvent(
                 (int)mapId, tileX, tileY, TileStatus.Processing, ExtractionPhase.Mmap));
 
-            bool success = await ProcessTileAsync(mapId, tileX, tileY, token);
+            bool success = await ProcessTileAsync(mapId, mapName, tileX, tileY, token);
 
             progress?.Report(new TileProgressEvent(
                 (int)mapId, tileX, tileY,
@@ -106,10 +109,11 @@ public sealed class MmapExtractorService
         writer.Write(16384);
     }
 
-    private async Task<bool> ProcessTileAsync(uint mapId, int tileX, int tileY, CancellationToken ct)
+    private async Task<bool> ProcessTileAsync(uint mapId, string mapName, int tileX, int tileY, CancellationToken ct)
     {
-        var geometry = await LoadTileGeometryAsync(mapId, tileX, tileY, ct);
-        if (geometry.Vertices.Length == 0)
+        var geometry = await LoadTileGeometryAsync(mapId, mapName, tileX, tileY, ct);
+        if (geometry.Vertices == null || geometry.Vertices.Length == 0 ||
+            geometry.Indices == null || geometry.Areas == null)
             return false;
         try
         {
@@ -123,7 +127,7 @@ public sealed class MmapExtractorService
         }
     }
 
-    private async Task<TileGeometry> LoadTileGeometryAsync(uint mapId, int centerX, int centerY, CancellationToken ct)
+    private async Task<TileGeometry> LoadTileGeometryAsync(uint mapId, string mapName, int centerX, int centerY, CancellationToken ct)
     {
         var tiles = new List<(int X, int Y, AdtFile[] Tile)>();
 
@@ -136,8 +140,7 @@ public sealed class MmapExtractorService
                 if (adjX < 0 || adjX >= 64 || adjY < 0 || adjY >= 64)
                     continue;
 
-                string mapDir = WowConstants.GetMapDirectory(mapId);
-                string adtPath = $"World\\Maps\\{mapDir}\\{mapDir}_{adjX:D2}_{adjY:D2}.adt";
+                string adtPath = $"World\\Maps\\{mapName}\\{mapName}_{adjX:D2}_{adjY:D2}.adt";
 
                 var result = await _adtParser.ParseAsync(adtPath, mapId, adjX, adjY, ct);
                 if (!result.Success)
@@ -173,15 +176,47 @@ public sealed class MmapExtractorService
                     || go.PosZ < tileMinZ || go.PosZ > tileMaxZ)
                     continue;
 
-                int baseIdx = geo.Vertices.Length / 3;
-                goVerts.Add(go.PosX); goVerts.Add(go.PosY); goVerts.Add(go.PosZ);
-                goVerts.Add(go.PosX + 0.5f); goVerts.Add(go.PosY); goVerts.Add(go.PosZ);
-                goVerts.Add(go.PosX + 0.5f); goVerts.Add(go.PosY); goVerts.Add(go.PosZ + 0.5f);
-                goVerts.Add(go.PosX); goVerts.Add(go.PosY); goVerts.Add(go.PosZ + 0.5f);
+                // Box obstacle (3D solid) — area=0 (RC_NULL_AREA) blocks Recast navigation
+                float hs = 0.5f * go.Scale; // half-size XZ
+                float ht = 2.0f * go.Scale; // total height Y
+                float x0 = go.PosX - hs, x1 = go.PosX + hs;
+                float y0 = go.PosY,       y1 = go.PosY + ht;
+                float z0 = go.PosZ - hs, z1 = go.PosZ + hs;
 
-                goIndices.Add(baseIdx); goIndices.Add(baseIdx + 1); goIndices.Add(baseIdx + 2);
-                goIndices.Add(baseIdx); goIndices.Add(baseIdx + 2); goIndices.Add(baseIdx + 3);
-                goAreas.Add(13); // NAV_BLOCKED
+                int baseIdx = goVerts.Count / 3;
+
+
+                // 8 vertices
+                goVerts.Add(x0); goVerts.Add(y0); goVerts.Add(z0);
+                goVerts.Add(x1); goVerts.Add(y0); goVerts.Add(z0);
+                goVerts.Add(x1); goVerts.Add(y0); goVerts.Add(z1);
+                goVerts.Add(x0); goVerts.Add(y0); goVerts.Add(z1);
+                goVerts.Add(x0); goVerts.Add(y1); goVerts.Add(z0);
+                goVerts.Add(x1); goVerts.Add(y1); goVerts.Add(z0);
+                goVerts.Add(x1); goVerts.Add(y1); goVerts.Add(z1);
+                goVerts.Add(x0); goVerts.Add(y1); goVerts.Add(z1);
+
+                // 12 triangles (6 faces × 2), area=0 for every triangle
+                // +Y face
+                goIndices.Add(baseIdx+4); goIndices.Add(baseIdx+5); goIndices.Add(baseIdx+6);
+                goIndices.Add(baseIdx+4); goIndices.Add(baseIdx+6); goIndices.Add(baseIdx+7);
+                // -Y face
+                goIndices.Add(baseIdx+1); goIndices.Add(baseIdx+0); goIndices.Add(baseIdx+3);
+                goIndices.Add(baseIdx+1); goIndices.Add(baseIdx+3); goIndices.Add(baseIdx+2);
+                // +X face
+                goIndices.Add(baseIdx+1); goIndices.Add(baseIdx+5); goIndices.Add(baseIdx+6);
+                goIndices.Add(baseIdx+1); goIndices.Add(baseIdx+6); goIndices.Add(baseIdx+2);
+                // -X face
+                goIndices.Add(baseIdx+0); goIndices.Add(baseIdx+4); goIndices.Add(baseIdx+7);
+                goIndices.Add(baseIdx+0); goIndices.Add(baseIdx+7); goIndices.Add(baseIdx+3);
+                // +Z face
+                goIndices.Add(baseIdx+3); goIndices.Add(baseIdx+7); goIndices.Add(baseIdx+6);
+                goIndices.Add(baseIdx+3); goIndices.Add(baseIdx+6); goIndices.Add(baseIdx+2);
+                // -Z face
+                goIndices.Add(baseIdx+0); goIndices.Add(baseIdx+1); goIndices.Add(baseIdx+5);
+                goIndices.Add(baseIdx+0); goIndices.Add(baseIdx+5); goIndices.Add(baseIdx+4);
+
+                for (int i = 0; i < 12; i++) goAreas.Add(0); // RC_NULL_AREA — solid obstacle
             }
 
             if (goVerts.Count > 0)
@@ -192,7 +227,9 @@ public sealed class MmapExtractorService
                 geo.Vertices.CopyTo(combinedVerts, 0);
                 goVerts.ToArray().CopyTo(combinedVerts, geo.Vertices.Length);
                 geo.Indices.CopyTo(combinedIdx, 0);
-                goIndices.ToArray().CopyTo(combinedIdx, geo.Indices.Length);
+                // B22: offset GO indices to point into the combined vertex array
+                int vertBase = geo.Vertices.Length / 3;
+                for (int i = 0; i < goIndices.Count; i++) combinedIdx[geo.Indices.Length + i] = goIndices[i] + vertBase;
                 geo.Areas.CopyTo(combinedAreas, 0);
                 goAreas.ToArray().CopyTo(combinedAreas, geo.Areas.Length);
                 geo = new TileGeometry(combinedVerts, combinedIdx, combinedAreas);
@@ -241,7 +278,8 @@ public sealed class MmapExtractorService
                         int v0 = vertexOffset + z * 9 + x;
                         indices.Add(v0); indices.Add(v0 + 9); indices.Add(v0 + 1);
                         indices.Add(v0 + 1); indices.Add(v0 + 9); indices.Add(v0 + 10);
-                        areas.Add(adt.GetChunkAreaType(chunkIdx));
+                        byte areaType = adt.GetChunkAreaType(chunkIdx);
+                        areas.Add(areaType); areas.Add(areaType);
                     }
                 }
                 vertexOffset = vertices.Count / 3;
@@ -359,7 +397,7 @@ public sealed class MmapExtractorService
         }, ct);
     }
 
-    public void ClearCache() => _adtParser.ClearCache();
+    internal void ClearCache() => _adtParser.ClearCache();
 }
 
 public readonly struct TileGeometry

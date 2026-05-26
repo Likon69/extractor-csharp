@@ -12,7 +12,7 @@ REM Check .NET SDK
 dotnet --version >nul 2>&1
 if errorlevel 1 (
     echo Error: .NET SDK not found
-    echo Please install .NET 8 SDK from https://dotnet.microsoft.com/download
+    echo Please install .NET 10 SDK from https://dotnet.microsoft.com/download
     exit /b 1
 )
 
@@ -46,7 +46,7 @@ echo   Build Complete
 echo ========================================
 echo.
 echo Output files:
-echo   - src\bin\Release\net8.0-windows\MaNGOS.Extractor.dll
+echo   - src\bin\Release\net10.0-windows\MaNGOS.Extractor.dll
 if exist "native\RecastBuilderDll\bin\Release\RecastBuilderDll.dll" (
     echo   - native\RecastBuilderDll\bin\Release\RecastBuilderDll.dll
 )

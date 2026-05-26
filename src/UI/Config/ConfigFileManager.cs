@@ -40,9 +40,10 @@ public static class ConfigFileManager
     {
         WowClientPath = @"C:\World of Warcraft",
         OutputPath = @"D:\wow-data\output",
-        GoSpawnsPath = "gameobject_spawns.bin",
-        EnabledPhases = new[] { "Map", "Vmap", "Mmap" },
-        SelectedMapIds = new[] { 0, 1, 530, 571 },
+        GoSpawnsPath = Path.Combine(AppContext.BaseDirectory, "gameobject_spawns.bin"),
+        OffMeshPath = Path.Combine(AppContext.BaseDirectory, "offmesh.txt"),
+        EnabledPhases = new[] { "Map", "Vmap", "Road", "Mmap" },
+        Maps = new[] { 0, 1, 530, 571 },
         Threads = 4,
         BigBaseUnit = false,
         RecastConfig = new RecastConfig()

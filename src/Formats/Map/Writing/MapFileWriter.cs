@@ -22,7 +22,7 @@ public sealed class MapFileWriter
 
     public async Task WriteTileAsync(MapTile tile, CancellationToken ct = default)
     {
-        string fileName = $"{tile.MapId:D3}{tile.TileX:D2}{tile.TileY:D2}.map";
+        string fileName = $"{tile.MapId:D3}{tile.TileY:D2}{tile.TileX:D2}.map";
         string filePath = Path.Combine(_outputDir, fileName);
         await Task.Run(() => WriteTileSync(tile, filePath), ct);
         _logger.LogDebug("Wrote tile: {Path}", filePath);

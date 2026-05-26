@@ -1,22 +1,33 @@
 @echo off
 REM Build RecastBuilderDll native DLL
-REM Requires Visual Studio 2022 Developer Command Prompt or MSVC installed
+REM Requires Visual Studio (any version) with C++ workload installed
 
 echo Building RecastBuilderDll...
-cd /d "%~dp0native\RecastBuilderDll"
+cd /d "%~dp0RecastBuilderDll"
 
-if exist "%ProgramFiles%\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" (
-    call "%ProgramFiles%\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
-) else if exist "%ProgramFiles(x86)%\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvarsall.bat" (
-    call "%ProgramFiles(x86)%\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
-) else (
-    echo Error: Visual Studio 2022 not found
-    echo Please install Visual Studio 2022 with C++ workload
+REM Use vswhere to locate any installed Visual Studio with C++ tools
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+if not exist "%VSWHERE%" set "VSWHERE=%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe"
+
+if not exist "%VSWHERE%" (
+    echo Error: vswhere.exe not found. Please install Visual Studio with C++ workload.
     exit /b 1
 )
+
+for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -requires Microsoft.VisualCpp.Tools.HostX64.TargetX64 -find VC\Auxiliary\Build\vcvarsall.bat`) do (
+    set "VCVARSALL=%%i"
+)
+
+if not defined VCVARSALL (
+    echo Error: No Visual Studio installation found with C++ workload.
+    echo Please install the "Desktop development with C++" workload in Visual Studio.
+    exit /b 1
+)
+
+call "%VCVARSALL%" x64
 
 msbuild RecastBuilderDll.vcxproj /p:Configuration=Release /p:Platform=x64 /t:Build /v:m
 if errorlevel 1 exit /b 1
 
 echo.
-echo Build complete: native\RecastBuilderDll\bin\Release\RecastBuilderDll.dll
+echo Build complete: RecastBuilderDll\bin\Release\RecastBuilderDll.dll

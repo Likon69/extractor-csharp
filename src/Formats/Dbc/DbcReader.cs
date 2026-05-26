@@ -69,9 +69,10 @@ public sealed class DbcReader<TRow> where TRow : unmanaged
         unsafe
         {
             TRow* rowPtr = &row;
-            int fieldOffset = fieldIndex * Unsafe.SizeOf<TRow>();
+            // DBC fields are each 4 bytes — NOT Unsafe.SizeOf<TRow>() which is the full row size
+            int fieldOffset = fieldIndex * sizeof(uint);
             uint stringOffset = MemoryMarshal.Read<uint>(
-                new ReadOnlySpan<byte>((byte*)rowPtr + fieldOffset, Unsafe.SizeOf<TRow>()));
+                new ReadOnlySpan<byte>((byte*)rowPtr + fieldOffset, sizeof(uint)));
 
             if (stringOffset >= _stringBlock.Length)
                 return string.Empty;
@@ -102,5 +103,27 @@ public sealed class DbcReader<TRow> where TRow : unmanaged
         int end = offset;
         while (end < block.Length && block[end] != 0) end++;
         return Encoding.UTF8.GetString(block.Slice(offset, end - offset));
+    }
+
+    public int GetInt32(TRow row, int fieldIndex)
+    {
+        unsafe
+        {
+            TRow* rowPtr = &row;
+            int fieldOffset = fieldIndex * sizeof(uint);
+            return MemoryMarshal.Read<int>(
+                new ReadOnlySpan<byte>((byte*)rowPtr + fieldOffset, sizeof(uint)));
+        }
+    }
+
+    public uint GetUInt32(TRow row, int fieldIndex)
+    {
+        unsafe
+        {
+            TRow* rowPtr = &row;
+            int fieldOffset = fieldIndex * sizeof(uint);
+            return MemoryMarshal.Read<uint>(
+                new ReadOnlySpan<byte>((byte*)rowPtr + fieldOffset, sizeof(uint)));
+        }
     }
 }

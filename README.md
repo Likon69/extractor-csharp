@@ -1,6 +1,6 @@
 # MaNGOS Unified Extractor
 
-C# (.NET 8) implementation of MaNGOS data extractors for WoW WotLK 3.3.5a (build 12340).
+C# (.NET 10) implementation of MaNGOS data extractors for WoW WotLK 3.3.5a (build 12340).
 
 ## Extractors
 
@@ -42,9 +42,11 @@ extractor-csharp/
 
 ## Requirements
 
-- .NET 8 SDK
+- .NET 10 SDK
 - Visual Studio 2022 with C++ workload (for native DLL only)
 - WoW 3.3.5a client data files
+- `StormLib.dll` (x64) — next to the EXE (MPQ reading)
+- `RecastBuilderDll.dll` (x64) — next to the EXE (Mmap phase only)
 
 ## Configuration
 
@@ -53,6 +55,8 @@ Edit `ExtractorConfig.json` or use the built-in UI to set:
 - `OutputPath`: Extraction output directory
 - `Maps`: Array of map IDs to process
 - `Phases`: Array of extraction phases to run
+- `GoSpawnsPath`: Path to `gameobject_spawns.bin` (default: next to EXE)
+- `OffMeshPath`: Path to `offmesh.txt` (default: next to EXE)
 
 ## Testing
 

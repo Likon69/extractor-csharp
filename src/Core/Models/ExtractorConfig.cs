@@ -10,6 +10,9 @@ public sealed class ExtractorConfig
     [JsonPropertyName("OutputPath")]
     public string? OutputPath { get; init; }
 
+    [JsonPropertyName("OffMeshPath")]
+    public string? OffMeshPath { get; init; }
+
     [JsonPropertyName("GoSpawnsPath")]
     public string GoSpawnsPath { get; init; } = "gameobject_spawns.bin";
 
@@ -19,8 +22,8 @@ public sealed class ExtractorConfig
     [JsonPropertyName("Phases")]
     public string[] EnabledPhases { get; init; } = Array.Empty<string>();
 
-    [JsonPropertyName("SelectedMapIds")]
-    public int[] SelectedMapIds { get; init; } = Array.Empty<int>();
+    [JsonPropertyName("Maps")]
+    public int[] Maps { get; init; } = Array.Empty<int>();
 
     [JsonPropertyName("Threads")]
     public int Threads { get; init; } = 4;

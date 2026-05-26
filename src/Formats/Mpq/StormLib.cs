@@ -19,7 +19,7 @@ public static class StormLib
     /// <param name="flags">Open flags (e.g., MPQ_OPEN_NO_LISTFILE).</param>
     /// <param name="handle">Output archive handle on success.</param>
     /// <returns>True if archive opened successfully.</returns>
-    [DllImport(DllName, EntryPoint = "SFileOpenArchiveW", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
+    [DllImport(DllName, EntryPoint = "SFileOpenArchive", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
     public static extern bool SFileOpenArchive(
         string path,
         uint priority,
@@ -79,20 +79,18 @@ public static class StormLib
 
     // File Enumeration
 
-    /// <summary>Starts enumeration of files in an archive or directory.</summary>
+    /// <summary>Starts enumeration of files in an archive. Returns find handle (INVALID_HANDLE_VALUE on failure).</summary>
     /// <param name="archive">Archive handle from SFileOpenArchive.</param>
-    /// <param name="searchMask">Search pattern (e.g., "*.adt" or null for all).</param>
-    /// <param name="findData">Output buffer for file information.</param>
-    /// <param name="reserved">Reserved (must be IntPtr.Zero).</param>
-    /// <param name="findHandle">Output find handle for subsequent calls (close with SFileFindClose).</param>
-    /// <returns>True if enumeration started or file found.</returns>
-    [DllImport(DllName, EntryPoint = "SFileFindFirstFileW", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
-    public static extern bool SFileFindFirstFile(
+    /// <param name="searchMask">Search pattern (e.g., "*.adt" or "*").</param>
+    /// <param name="findData">Output buffer for the first file information.</param>
+    /// <param name="listFile">Path to external listfile (pass IntPtr.Zero for none).</param>
+    /// <returns>Find handle for SFileFindNextFile/SFileFindClose, or INVALID_HANDLE_VALUE on failure.</returns>
+    [DllImport(DllName, EntryPoint = "SFileFindFirstFile", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
+    public static extern IntPtr SFileFindFirstFile(
         IntPtr archive,
-        [MarshalAs(UnmanagedType.LPWStr)] string? searchMask,
-        [Out] out SFileFindData findData,
-        IntPtr reserved,
-        out IntPtr findHandle);
+        [MarshalAs(UnmanagedType.LPStr)] string searchMask,
+        out SFileFindData findData,
+        IntPtr listFile);
 
     /// <summary>Continues file enumeration started by SFileFindFirstFile.</summary>
     /// <param name="findHandle">Find handle from SFileFindFirstFile.</param>

@@ -62,7 +62,7 @@ public sealed class RoadExtractorService
             progress?.Report(new TileProgressEvent(
                 (int)mapId, tileX, tileY, TileStatus.Processing, ExtractionPhase.Road));
 
-            bool success = await ProcessTileAsync(mapId, tileX, tileY, ct);
+            bool success = await ProcessTileAsync(mapId, mapName, tileX, tileY, ct);
 
             progress?.Report(new TileProgressEvent(
                 (int)mapId, tileX, tileY,
@@ -77,10 +77,9 @@ public sealed class RoadExtractorService
         return successCount;
     }
 
-    private async Task<bool> ProcessTileAsync(uint mapId, int tileX, int tileY, CancellationToken ct)
+    private async Task<bool> ProcessTileAsync(uint mapId, string mapName, int tileX, int tileY, CancellationToken ct)
     {
-        string mapDir = WowConstants.GetMapDirectory(mapId);
-        string adtPath = $"World\\Maps\\{mapDir}\\{mapDir}_{tileX:D2}_{tileY:D2}.adt";
+        string adtPath = $"World\\Maps\\{mapName}\\{mapName}_{tileX:D2}_{tileY:D2}.adt";
 
         var result = await _adtParser.ParseAsync(adtPath, mapId, tileX, tileY, ct);
         if (!result.Success || result.Tile == null)
@@ -88,7 +87,7 @@ public sealed class RoadExtractorService
 
         var roadFlags = DetectRoadChunksPerChunk(result.Tile);
 
-        string fileName = $"{mapId:D3}{tileX:D2}{tileY:D2}.road";
+        string fileName = $"{mapId:D3}{tileY:D2}{tileX:D2}.road";
         string filePath = Path.Combine(_outputDir, fileName);
 
         try
@@ -139,5 +138,5 @@ public sealed class RoadExtractorService
         return false;
     }
 
-    public void ClearCache() => _adtParser.ClearCache();
+    internal void ClearCache() => _adtParser.ClearCache();
 }

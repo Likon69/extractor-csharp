@@ -37,27 +37,35 @@ public sealed class MpqArchiveCollection : IArchiveReader
 
     private void DiscoverAndOpenArchives(string locale, ILoggerFactory loggerFactory)
     {
-        var dataDir = Path.Combine(_wowDirectory, "Data");
-        var patchDir = Path.Combine(dataDir, "patch");
+        var dataDir   = Path.Combine(_wowDirectory, "Data");
+        var localeDir = Path.Combine(dataDir, locale); // e.g. Data/enUS
 
         var paths = new List<string>();
 
-        // Priority: locales > expansion > lichking > common > patches
-        AddIfExists(paths, dataDir, $"locales/{locale}.MPQ");
-        AddIfExists(paths, dataDir, $"locales/{locale}-export.MPQ");
+        // WotLK 3.3.5a layout: locale files are in Data/{locale}/
+        // locale-{locale}.MPQ contains DBFilesClient DBC files
+        AddIfExists(paths, localeDir, $"locale-{locale}.MPQ");
+        AddIfExists(paths, localeDir, $"expansion-locale-{locale}.MPQ");
+        AddIfExists(paths, localeDir, $"lichking-locale-{locale}.MPQ");
+
+        // Base game archives (Data/ root)
         AddIfExists(paths, dataDir, "expansion.MPQ");
         AddIfExists(paths, dataDir, "lichking.MPQ");
         AddIfExists(paths, dataDir, "common.MPQ");
         AddIfExists(paths, dataDir, "common-2.MPQ");
 
-        // Patches (lowest priority)
-        AddIfExists(paths, patchDir, "patch.MPQ");
-        AddIfExists(paths, patchDir, "patch-2.MPQ");
-        AddIfExists(paths, patchDir, "patch-3.MPQ");
-        AddIfExists(paths, dataDir, $"patch-{locale}.MPQ");
+        // Patches in Data/ root
+        AddIfExists(paths, dataDir, "patch.MPQ");
+        AddIfExists(paths, dataDir, "patch-2.MPQ");
+        AddIfExists(paths, dataDir, "patch-3.MPQ");
+
+        // Locale patches in Data/{locale}/
+        AddIfExists(paths, localeDir, $"patch-{locale}.MPQ");
+        AddIfExists(paths, localeDir, $"patch-{locale}-2.MPQ");
+        AddIfExists(paths, localeDir, $"patch-{locale}-3.MPQ");
 
         if (paths.Count == 0)
-            throw new MpqException($"No MPQ archives found in: {dataDir}");
+            throw new MpqException($"No MPQ archives found in: {dataDir} (locale dir: {localeDir})");
 
         var logger = loggerFactory.CreateLogger<MpqArchive>();
 

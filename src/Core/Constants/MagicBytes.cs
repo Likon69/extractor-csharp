@@ -25,6 +25,7 @@ public static class MagicBytes
     public const uint OffMeshMagic = 0x4D4D4F46;
 
     public const uint Mver = 0x4D564552;
+    public const uint Mphd = 0x4D504844;  // WDT header flags chunk
     public const uint Mhdr = 0x4D484452;
     public const uint Mcin = 0x4D43494E;
     public const uint Mcnk = 0x4D434E4B;

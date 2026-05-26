@@ -47,6 +47,6 @@ public class ExtractorConfigTests
         Assert.Null(config.WowClientPath);
         Assert.Null(config.OutputPath);
         Assert.Empty(config.EnabledPhases);
-        Assert.Empty(config.SelectedMapIds);
+        Assert.Empty(config.Maps);
     }
 }

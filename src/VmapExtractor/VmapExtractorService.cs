@@ -67,7 +67,7 @@ public sealed class VmapExtractorService
             progress?.Report(new TileProgressEvent(
                 (int)mapId, tileX, tileY, TileStatus.Processing, ExtractionPhase.Vmap));
 
-            bool success = await ProcessTileAsync(mapId, tileX, tileY, ct);
+            bool success = await ProcessTileAsync(mapId, mapName, tileX, tileY, ct);
 
             progress?.Report(new TileProgressEvent(
                 (int)mapId, tileX, tileY,
@@ -82,10 +82,9 @@ public sealed class VmapExtractorService
         return successCount;
     }
 
-    private async Task<bool> ProcessTileAsync(uint mapId, int tileX, int tileY, CancellationToken ct)
+    private async Task<bool> ProcessTileAsync(uint mapId, string mapName, int tileX, int tileY, CancellationToken ct)
     {
-        string mapDir = WowConstants.GetMapDirectory(mapId);
-        string adtPath = $"World\\Maps\\{mapDir}\\{mapDir}_{tileX:D2}_{tileY:D2}.adt";
+        string adtPath = $"World\\Maps\\{mapName}\\{mapName}_{tileX:D2}_{tileY:D2}.adt";
 
         var result = await _adtParser.ParseAsync(adtPath, mapId, tileX, tileY, ct);
         if (!result.Success)
@@ -175,5 +174,5 @@ public sealed class VmapExtractorService
     private static string? GetModelName(string[] names, int index)
         => index >= 0 && index < names.Length ? names[index] : null;
 
-    public void ClearCache() => _adtParser.ClearCache();
+    internal void ClearCache() => _adtParser.ClearCache();
 }

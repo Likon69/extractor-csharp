@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
@@ -13,6 +13,8 @@
     <Authors>MaNGOS Extractor Team</Authors>
     <Product>MaNGOS Unified Extractor</Product>
     <Description>World of Warcraft data extraction tools for MaNGOS server (WotLK 3.3.5a)</Description>
+    <OutputType>WinExe</OutputType>
+    <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
@@ -29,6 +31,12 @@
     <Content Include="..\native\RecastBuilderDll\bin\$(Configuration)\RecastBuilderDll.dll" 
              Condition="Exists('..\native\RecastBuilderDll\bin\$(Configuration)\RecastBuilderDll.dll')"
              CopyToOutputDirectory="PreserveNewest" Link="RecastBuilderDll.dll" />
+    <Content Include="..\StormLib.dll"
+             Condition="Exists('..\StormLib.dll')"
+             CopyToOutputDirectory="PreserveNewest" Link="StormLib.dll" />
+    <Content Include="..\gameobject_spawns.bin"
+             Condition="Exists('..\gameobject_spawns.bin')"
+             CopyToOutputDirectory="PreserveNewest" Link="gameobject_spawns.bin" />
   </ItemGroup>
 
 </Project>
