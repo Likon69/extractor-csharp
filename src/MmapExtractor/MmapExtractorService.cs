@@ -97,18 +97,18 @@ public sealed class MmapExtractorService
         using var stream = new FileStream(mmapPath, FileMode.Create, FileAccess.Write);
         using var writer = new BinaryWriter(stream);
 
-        // dtNavMeshParams: origin is the bmin of the map
-        // For origin, use (0, 0) since map coordinates start at -MapHalfSize
-        // tileWidth/tileHeight = full ADT tile size (not sub-tile)
-        // maxTiles = number of ADT tiles (not sub-tiles)
-        // maxPolys = 1 << DT_POLY_BITS (DT_POLY_BITS=14, so 16384 per tile)
-        writer.Write(-WowConstants.MapHalfSize);  // origin X
-        writer.Write(0f);                         // origin Y
-        writer.Write(-WowConstants.MapHalfSize); // origin Z
-        writer.Write(WowConstants.TileSize);     // tileWidth = 533.333f
-        writer.Write(WowConstants.TileSize);     // tileHeight = 533.333f
-        writer.Write(tileCount);                 // maxTiles = number of ADTs
-        writer.Write(16384);                     // maxPolys = 1 << 14 per tile
+        // dtNavMeshParams: 4×4 sub-tile architecture
+        // tileWidth/tileHeight = sub-tile size = 133.333f (TileSize/4)
+        // maxTiles = number of ADTs × 16 (16 sub-tiles per ADT)
+        // maxPolys = 1 << DT_POLY_BITS = 16384
+        // origin = corner of the map in world coords
+        writer.Write(-WowConstants.MapHalfSize);
+        writer.Write(0f);
+        writer.Write(-WowConstants.MapHalfSize);
+        writer.Write(WowConstants.TileSize / 4);  // tileWidth = 133.333f
+        writer.Write(WowConstants.TileSize / 4);  // tileHeight = 133.333f
+        writer.Write(tileCount * 16);            // maxTiles = ADTs × 16
+        writer.Write(16384);                     // maxPolys = 1 << 14
     }
 
     private async Task<bool> ProcessTileAsync(uint mapId, int tileX, int tileY, CancellationToken ct)
