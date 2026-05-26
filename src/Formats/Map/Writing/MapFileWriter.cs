@@ -6,37 +6,24 @@ using MaNGOS.Extractor.Formats.Map.Models;
 
 namespace MaNGOS.Extractor.Formats.Map.Writing;
 
-/// <summary>
-/// Writes MaNGOS .map terrain files from parsed ADT tiles.
-/// One file per tile: {mapId:03d}{tileX:02d}{tileY:02d}.map
-/// </summary>
 public sealed class MapFileWriter
 {
     private readonly ILogger<MapFileWriter> _logger;
     private readonly string _outputDir;
 
-    /// <summary>
-    /// Creates a new .map writer.
-    /// </summary>
     public MapFileWriter(string outputDir, ILogger<MapFileWriter> logger)
     {
         _outputDir = outputDir;
         _logger = logger;
-
         if (!Directory.Exists(outputDir))
             Directory.CreateDirectory(outputDir);
     }
 
-    /// <summary>
-    /// Writes a single .map tile file.
-    /// </summary>
     public async Task WriteTileAsync(MapTile tile, CancellationToken ct = default)
     {
         string fileName = $"{tile.MapId:D3}{tile.TileX:D2}{tile.TileY:D2}.map";
         string filePath = Path.Combine(_outputDir, fileName);
-
         await Task.Run(() => WriteTileSync(tile, filePath), ct);
-
         _logger.LogDebug("Wrote tile: {Path}", filePath);
     }
 
@@ -45,88 +32,94 @@ public sealed class MapFileWriter
         using var stream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
         using var writer = new BinaryWriter(stream);
 
-        writer.Write(MagicBytes.MapMagicWotlk); // mapMagic
-        writer.Write(1u); // versionMagic
-        writer.Write(WowConstants.TargetBuild); // buildMagic
+        writer.Write(MagicBytes.MapMagicWotlk);
+        writer.Write(1u);
+        writer.Write(WowConstants.TargetBuild);
 
-        // Area map section
         uint areaMapOffset = 44;
+        uint heightMapOffset = areaMapOffset + 8 + 256 * 2;
+        uint liquidMapOffset = heightMapOffset + 16 + (129 * 129 + 128 * 128) * 4;
+        uint holesOffset = liquidMapOffset + 16;
+
         writer.Write(areaMapOffset);
-        writer.Write(512u); // 256 × ushort
-
-        // Height map section
-        uint heightMapOffset = areaMapOffset + 512;
         writer.Write(heightMapOffset);
-        writer.Write(16u + (uint)(tile.HeightMap?.Length ?? 145) * 4); // header + heights
-
-        // Liquid map section
-        uint liquidMapOffset = heightMapOffset + 16u + (uint)(tile.HeightMap?.Length ?? 145) * 4;
         writer.Write(liquidMapOffset);
-        writer.Write(tile.LiquidMap != null ? 16u : 0u);
-
-        // Holes section
-        uint holesOffset = liquidMapOffset + (tile.LiquidMap != null ? 16u : 0u);
         writer.Write(holesOffset);
-        writer.Write(512u); // 256 × ushort
+        writer.Write(512u);
 
-        if (tile.AreaMap != null)
-        {
-            for (int i = 0; i < 256; i++)
-                writer.Write(i < tile.AreaMap.Length ? tile.AreaMap[i] : (ushort)0);
-        }
-        else
-        {
-            for (int i = 0; i < 256; i++)
-                writer.Write((ushort)0);
-        }
+        // Area section: GridMapAreaHeader (8 bytes) + uint16[16][16]
+        writer.Write(0x47444944u); // 'GRID' fourcc
+        writer.Write(0u); // flags
+        for (int z = 0; z < 16; z++)
+            for (int x = 0; x < 16; x++)
+                writer.Write(tile.AreaMap != null ? tile.AreaMap[z * 16 + x] : (ushort)0);
 
+        // Height section: GridMapHeightHeader (16 bytes) + V9[129][129] + V8[128][128]
         writer.Write(MagicBytes.HeightMapMagic);
         writer.Write(0u); // flags
         writer.Write(tile.MinHeight);
         writer.Write(tile.MaxHeight);
 
-        if (tile.HeightMap != null)
+        var v9 = BuildV9Heights(tile);
+        var v8 = BuildV8Heights(tile, v9);
+
+        foreach (var h in v9) writer.Write(h);
+        foreach (var h in v8) writer.Write(h);
+
+        // Liquid section: GridMapLiquidHeader (16 bytes) + liquid data
+        writer.Write(MagicBytes.LiquidMapMagic);
+        writer.Write((ushort)0); // flags
+        writer.Write((ushort)0); // liquidType
+        writer.Write((byte)0); // offsetX
+        writer.Write((byte)0); // offsetY
+        writer.Write((byte)0); // width
+        writer.Write((byte)0); // height
+        writer.Write(0f); // liquidLevel
+
+        // Holes section: uint16[16][16]
+        for (int z = 0; z < 16; z++)
+            for (int x = 0; x < 16; x++)
+                writer.Write(tile.HolesMap != null ? tile.HolesMap[z * 16 + x] : (ushort)0);
+    }
+
+    private static float[] BuildV9Heights(MapTile tile)
+    {
+        var heights = new float[129 * 129];
+        if (tile.HeightMap == null || tile.HeightMap.Length < 256 * 145)
         {
-            foreach (var h in tile.HeightMap)
-                writer.Write(h);
-        }
-        else
-        {
-            for (int i = 0; i < 145; i++)
-                writer.Write(0f);
+            for (int i = 0; i < heights.Length; i++) heights[i] = 0f;
+            return heights;
         }
 
-        if (tile.LiquidMap != null)
+        for (int chunkZ = 0; chunkZ < 16; chunkZ++)
         {
-            writer.Write(MagicBytes.LiquidMapMagic);
-
-            foreach (var entry in tile.LiquidMap)
+            for (int chunkX = 0; chunkX < 16; chunkX++)
             {
-                writer.Write((ushort)(entry.HasLiquid ? 0 : 0x0001)); // flags
-                writer.Write((ushort)entry.Type);
-                writer.Write(entry.OffsetX);
-                writer.Write(entry.OffsetY);
-                writer.Write(entry.Width);
-                writer.Write(entry.Height);
-                writer.Write(entry.Level);
+                var chunkHeights = tile.HeightMap.AsSpan(chunkZ * 16 * 145 + chunkX * 145, 145);
+                int vBaseZ = chunkZ * 8;
+                int vBaseX = chunkX * 8;
+
+                for (int z = 0; z < 9; z++)
+                    for (int x = 0; x < 9; x++)
+                        heights[(vBaseZ + z) * 129 + (vBaseX + x)] = chunkHeights[z * 9 + x];
             }
         }
 
-        if (tile.HolesMap != null)
-        {
-            for (int i = 0; i < 256; i++)
-                writer.Write(i < tile.HolesMap.Length ? tile.HolesMap[i] : (ushort)0);
-        }
-        else
-        {
-            for (int i = 0; i < 256; i++)
-                writer.Write((ushort)0);
-        }
+        return heights;
     }
 
-    /// <summary>
-    /// Converts an ADT tile to a MapTile for .map output.
-    /// </summary>
+    private static float[] BuildV8Heights(MapTile tile, float[] v9)
+    {
+        var heights = new float[128 * 128];
+        for (int z = 0; z < 128; z++)
+            for (int x = 0; x < 128; x++)
+            {
+                int baseIdx = z * 129 + x;
+                heights[z * 128 + x] = (v9[baseIdx] + v9[baseIdx + 1] + v9[baseIdx + 129] + v9[baseIdx + 130]) * 0.25f;
+            }
+        return heights;
+    }
+
     public static MapTile FromAdtTile(AdtFile adt)
     {
         var tile = new MapTile(adt.MapId, adt.TileX, adt.TileY)

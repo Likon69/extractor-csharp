@@ -84,17 +84,17 @@ public sealed class RoadExtractorService
         string adtPath = $"World\\Maps\\{mapDir}\\{mapDir}_{tileX:D2}_{tileY:D2}.adt";
 
         var result = await _adtParser.ParseAsync(adtPath, mapId, tileX, tileY, ct);
-        if (!result.Success)
+        if (!result.Success || result.Tile == null)
             return false;
 
-        var roadFlags = DetectRoadChunks(result.Tile!);
+        var roadFlags = DetectRoadChunksPerChunk(result.Tile);
 
         string fileName = $"{mapId:D3}{tileX:D2}{tileY:D2}.road";
         string filePath = Path.Combine(_outputDir, fileName);
 
         try
         {
-            await WriteRoadFileAsync(filePath, roadFlags, ct);
+            await File.WriteAllBytesAsync(filePath, roadFlags, ct);
             return true;
         }
         catch (Exception ex)
@@ -104,39 +104,33 @@ public sealed class RoadExtractorService
         }
     }
 
-    private static byte[] DetectRoadChunks(AdtFile adt)
+    private byte[] DetectRoadChunksPerChunk(AdtFile adt)
     {
         var roadFlags = new byte[256];
 
-        var textureNames = adt.TextureNames;
-
         for (int chunkIdx = 0; chunkIdx < 256; chunkIdx++)
         {
-            int areaId = adt.GetAreaId(chunkIdx);
+            uint textureId = adt.GetChunkTextureId(chunkIdx);
 
-            bool hasRoad = false;
-            foreach (var texName in textureNames)
+            if (textureId < adt.TextureNames.Length)
             {
-                if (IsRoadTexture(texName))
-                {
-                    hasRoad = true;
-                    break;
-                }
+                string texName = adt.TextureNames[(int)textureId];
+                roadFlags[chunkIdx] = IsRoadTexture(texName) ? (byte)1 : (byte)0;
             }
-
-            roadFlags[chunkIdx] = hasRoad ? (byte)1 : (byte)0;
+            else
+            {
+                roadFlags[chunkIdx] = 0;
+            }
         }
 
         return roadFlags;
     }
 
-    private async Task WriteRoadFileAsync(string path, byte[] roadFlags, CancellationToken ct)
-    {
-        await File.WriteAllBytesAsync(path, roadFlags, ct);
-    }
-
     private static bool IsRoadTexture(string textureName)
     {
+        if (string.IsNullOrEmpty(textureName))
+            return false;
+
         string lower = textureName.ToLowerInvariant();
         foreach (var pattern in RoadPatterns)
         {

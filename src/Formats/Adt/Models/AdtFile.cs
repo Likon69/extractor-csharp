@@ -11,6 +11,7 @@ public sealed class AdtFile
     private readonly float[] _heights;
     private readonly ushort[] _areaIds;
     private readonly LiquidData[] _liquids;
+    private readonly uint[] _chunkTextureIds; // MCLY: which texture each MCNK uses
 
     /// <summary>Map ID this tile belongs to.</summary>
     public uint MapId { get; }
@@ -151,7 +152,8 @@ public sealed class AdtFile
         AdtMcin[] mcinEntries, AdtMfbo? flightBounds,
         string[] textures, string[] wmos, string[] models,
         AdtMddf[] doodads, AdtModf[] wmosPlacements,
-        float[] heights, ushort[] areaIds, LiquidData[] liquids)
+        float[] heights, ushort[] areaIds, LiquidData[] liquids,
+        uint[] chunkTextureIds)
     {
         MapId = mapId;
         TileX = tileX;
@@ -168,7 +170,16 @@ public sealed class AdtFile
         _heights = heights;
         _areaIds = areaIds;
         _liquids = liquids;
+        _chunkTextureIds = chunkTextureIds ?? new uint[256];
     }
+
+    /// <summary>
+    /// Gets the primary texture ID used by a specific MCNK chunk.
+    /// </summary>
+    public uint GetChunkTextureId(int chunkIndex) =>
+        chunkIndex >= 0 && chunkIndex < 256 && _chunkTextureIds != null
+            ? _chunkTextureIds[chunkIndex]
+            : 0;
 }
 
 /// <summary>

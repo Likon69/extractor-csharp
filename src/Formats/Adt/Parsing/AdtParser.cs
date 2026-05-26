@@ -191,10 +191,20 @@ public sealed class AdtParser
         var mddf = header.MddfOffset > 0 ? ParseMddf(reader, header.MddfOffset) : Array.Empty<AdtMddf>();
         var modf = header.ModfOffset > 0 ? ParseModf(reader, header.ModfOffset) : Array.Empty<AdtModf>();
 
+        // Parse texture IDs for each MCNK from MCLY chunks
+        var chunkTextureIds = new uint[256];
+        for (int i = 0; i < 256; i++)
+        {
+            if (i < mcinEntries.Length && mcinEntries[i].Offset > 0)
+            {
+                chunkTextureIds[i] = ParseMcnkPrimaryTexture(reader, (int)mcinEntries[i].Offset);
+            }
+        }
+
         var tile = new AdtFile(
             mapId, tileX, tileY, path, header, mcinEntries, mfbo,
             textures, wmos, models, mddf, modf,
-            allHeights, areaIds, liquids);
+            allHeights, areaIds, liquids, chunkTextureIds);
 
         return new AdtParseResult(tile, warnings);
     }
@@ -252,6 +262,39 @@ public sealed class AdtParser
         }
 
         return liquid;
+    }
+
+    private uint ParseMcnkPrimaryTexture(SpanReader reader, int mcnkOffset)
+    {
+        int savedPos = reader.Position;
+        reader.Seek(mcnkOffset);
+
+        uint magic = reader.ReadUInt32();
+        if (magic != MagicBytes.Mcnk)
+        {
+            reader.Seek(savedPos);
+            return 0;
+        }
+        reader.Skip(4);
+
+        uint mclyOffset = reader.ReadUInt32();
+        reader.Seek(savedPos);
+
+        if (mclyOffset == 0)
+            return 0;
+
+        reader.Seek(mcnkOffset + (int)mclyOffset + 8);
+        uint count = reader.ReadUInt32();
+
+        uint primaryTextureId = 0;
+        if (count > 0)
+        {
+            reader.Skip(16);
+            primaryTextureId = reader.ReadUInt32();
+        }
+
+        reader.Seek(savedPos);
+        return primaryTextureId;
     }
 
     private AdtMcin[] ParseMcin(SpanReader reader, uint offset)
