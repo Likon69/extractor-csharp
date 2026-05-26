@@ -117,7 +117,7 @@ public ref struct SpanReader
     public string ReadFixedString(int length)
     {
         int end = _position + length;
-        while (end > _position && (end <= _buffer.Length && _buffer[end - 1] == 0 || _buffer[end - 1] == ' '))
+        while (end > _position && end <= _buffer.Length && (_buffer[end - 1] == 0 || _buffer[end - 1] == ' '))
             end--;
 
         int len = end - _position;

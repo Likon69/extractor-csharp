@@ -56,8 +56,9 @@ public sealed class MapFileWriter
         writer.Write(holesSize);                // 16 bytes holes
 
         // Area section: GridMapAreaHeader(8 bytes) + uint16[16][16]
-        writer.Write(0x47444944u); // 'GRID' fourcc
-        writer.Write(0u); // flags
+        writer.Write(0x41455241u); // "AREA" LE — MaNGOS MAP_AREA_MAGIC
+        writer.Write((ushort)0);   // flags  (uint16)
+        writer.Write((ushort)0);   // gridArea (uint16)
         for (int z = 0; z < 16; z++)
             for (int x = 0; x < 16; x++)
                 writer.Write(tile.AreaMap != null ? tile.AreaMap[z * 16 + x] : (ushort)0);

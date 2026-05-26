@@ -35,8 +35,8 @@ public struct RecastBuildParams
     public int WalkableClimb;
     public int TileX;
     public int TileY;
-    public float MinRegionArea;
-    public float MergeRegionArea;
+    public int MinRegionArea;    // cell count, e.g. rcSqr(20) = 400
+    public int MergeRegionArea;  // cell count, e.g. rcSqr(40) = 1600
     public float MaxSimplificationError;
     public int MaxVertsPerPoly;
 }

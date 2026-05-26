@@ -516,7 +516,7 @@ public sealed class AdtParser
             reader.Skip(8);
 
             for (int i = 0; i < AdtMcvt.TotalVertices; i++)
-                heights[i] = reader.ReadFloat();
+                heights[i] = header.PositionY + reader.ReadFloat();
         }
 
         return (heights, (ushort)header!.AreaId, waterData ?? LiquidData.Empty);

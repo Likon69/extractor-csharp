@@ -260,25 +260,51 @@ public sealed class MmapExtractorService
 
                 var chunkHeights = adt.GetChunkHeights(chunkIdx);
 
+                float v9Step = WowConstants.ChunkSize / (WowConstants.MCNKVerticesSide - 1); // 33.333f/8 = 4.166f
+
+                // V9 outer vertices: 9x9 = 81 per chunk
                 for (int z = 0; z < 9; z++)
                 {
                     for (int x = 0; x < 9; x++)
                     {
                         float h = AdtMcvt.GetV9(chunkHeights, z, x);
-                        vertices.Add(chunkOriginX + x * WowConstants.ChunkSize / WowConstants.MCNKVerticesSide);
+                        vertices.Add(chunkOriginX + x * v9Step);
                         vertices.Add(h);
-                        vertices.Add(chunkOriginZ + z * WowConstants.ChunkSize / WowConstants.MCNKVerticesSide);
+                        vertices.Add(chunkOriginZ + z * v9Step);
                     }
                 }
 
+                // V8 inner vertices: 8x8 = 64 per chunk (cell centers)
+                int v8BaseOffset = vertices.Count / 3;
                 for (int z = 0; z < 8; z++)
                 {
                     for (int x = 0; x < 8; x++)
                     {
-                        int v0 = vertexOffset + z * 9 + x;
-                        indices.Add(v0); indices.Add(v0 + 9); indices.Add(v0 + 1);
-                        indices.Add(v0 + 1); indices.Add(v0 + 9); indices.Add(v0 + 10);
-                        byte areaType = adt.GetChunkAreaType(chunkIdx);
+                        float h = AdtMcvt.GetV8(chunkHeights, z, x);
+                        vertices.Add(chunkOriginX + (x + 0.5f) * v9Step);
+                        vertices.Add(h);
+                        vertices.Add(chunkOriginZ + (z + 0.5f) * v9Step);
+                    }
+                }
+
+                // 4-triangle fan per cell (V9 corners + V8 center)
+                byte areaType = adt.GetChunkAreaType(chunkIdx);
+                for (int z = 0; z < 8; z++)
+                {
+                    for (int x = 0; x < 8; x++)
+                    {
+                        int v9_00 = vertexOffset + z * 9 + x;
+                        int v9_01 = vertexOffset + z * 9 + x + 1;
+                        int v9_10 = vertexOffset + (z + 1) * 9 + x;
+                        int v9_11 = vertexOffset + (z + 1) * 9 + x + 1;
+                        int v8c   = v8BaseOffset + z * 8 + x;
+
+                        indices.Add(v9_00); indices.Add(v8c);  indices.Add(v9_01);
+                        indices.Add(v9_01); indices.Add(v8c);  indices.Add(v9_11);
+                        indices.Add(v9_11); indices.Add(v8c);  indices.Add(v9_10);
+                        indices.Add(v9_10); indices.Add(v8c);  indices.Add(v9_00);
+
+                        areas.Add(areaType); areas.Add(areaType);
                         areas.Add(areaType); areas.Add(areaType);
                     }
                 }

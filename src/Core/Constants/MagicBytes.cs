@@ -14,8 +14,8 @@ public static class MagicBytes
     public static ReadOnlySpan<byte> VMapMagicWotlk => "VMAPt07"u8;
     public static ReadOnlySpan<byte> MMapMagicWotlk => "t06"u8;
 
-    public const uint HeightMapMagic = 0x72476864;
-    public const uint LiquidMapMagic = 0x4C486472;
+    public const uint HeightMapMagic = 0x5447484D; // "MHGT" LE — MaNGOS MAP_HEIGHT_MAGIC
+    public const uint LiquidMapMagic = 0x51494C4D; // "MLIQ" LE — MaNGOS MAP_LIQUID_MAGIC
     public const uint MmapTileMagic = 0x4D4D4150;
     public const uint MmapMagic = MmapTileMagic;
     public const uint MmapVersion = 4;
