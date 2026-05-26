@@ -26,7 +26,7 @@ bool BuildTile(
     *outSize = 0;
 
     // Allocate local context per call (no static state)
-    rcContext* ctx = rcAllocContext();
+    rcContext* ctx = new rcContext();
 
     float bmin[3] = { params->BoundingBoxMinX, params->BoundingBoxMinY, params->BoundingBoxMinZ };
     float bmax[3] = { params->BoundingBoxMaxX, params->BoundingBoxMaxY, params->BoundingBoxMaxZ };
@@ -162,7 +162,7 @@ bool BuildTile(
         // RC_WALKABLE_AREA = 63 = default area, set to 0 (NAV_GROUND)
         // NAV_WATER should be set based on liquid detection
         if (pmesh->areas[i] == RC_WALKABLE_AREA)
-            pmesh->areas[i] = 0;
+            pmesh->areas[i] = 1;
         
         // Default to NAV_GROUND (0x01), NAV_WATER = 0x04 for liquid areas
         pmesh->flags[i] = 1;
@@ -170,6 +170,8 @@ bool BuildTile(
 
     dtNavMeshCreateParams navParams;
     memset(&navParams, 0, sizeof(navParams));
+    navParams.tileX = params->TileX;
+    navParams.tileY = params->TileY;
 
     navParams.verts = pmesh->verts;
     navParams.vertCount = pmesh->nverts;
@@ -206,7 +208,7 @@ bool BuildTile(
 
     rcFreePolyMeshDetail(dmesh);
     rcFreePolyMesh(pmesh);
-    rcFreeContext(ctx);
+    delete ctx;
 
     *outData = navData;
     *outSize = navDataSize;

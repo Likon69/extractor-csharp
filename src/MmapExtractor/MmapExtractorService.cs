@@ -35,7 +35,6 @@ public sealed class MmapExtractorService
         _outputDir = outputDir;
         _recastConfig = recastConfig;
         _maxDegreeOfParallelism = Math.Max(1, maxDegreeOfParallelism);
-
         if (!Directory.Exists(outputDir))
             Directory.CreateDirectory(outputDir);
     }
@@ -56,7 +55,6 @@ public sealed class MmapExtractorService
 
         var tiles = _wdtReader.GetExistingTiles();
         _logger.LogInformation("Found {Count} tiles for map {MapName}", tiles.Count, mapName);
-
         int successCount = 0;
 
         var options = new ParallelOptions
@@ -68,7 +66,6 @@ public sealed class MmapExtractorService
         await Parallel.ForEachAsync(tiles, options, async (tile, token) =>
         {
             var (tileX, tileY) = tile;
-
             progress?.Report(new TileProgressEvent(
                 (int)mapId, tileX, tileY, TileStatus.Processing, ExtractionPhase.Mmap));
 
@@ -84,10 +81,7 @@ public sealed class MmapExtractorService
         });
 
         _logger.LogInformation("Mmap extraction complete: {Success}/{Total} tiles", successCount, tiles.Count);
-
-        // Write .mmap header file with dtNavMeshParams
         WriteMmapHeader(mapId, (uint)tiles.Count);
-
         return successCount;
     }
 
@@ -97,18 +91,17 @@ public sealed class MmapExtractorService
         using var stream = new FileStream(mmapPath, FileMode.Create, FileAccess.Write);
         using var writer = new BinaryWriter(stream);
 
-        // dtNavMeshParams: 4×4 sub-tile architecture
-        // tileWidth/tileHeight = sub-tile size = 133.333f (TileSize/4)
-        // maxTiles = number of ADTs × 16 (16 sub-tiles per ADT)
-        // maxPolys = 1 << DT_POLY_BITS = 16384
-        // origin = corner of the map in world coords
+        writer.Write(MagicBytes.MmapMagic);
+        writer.Write(MagicBytes.DtNavMeshVersion);
+        writer.Write(MagicBytes.MmapVersion);
+        writer.Write(tileCount);
         writer.Write(-WowConstants.MapHalfSize);
         writer.Write(0f);
         writer.Write(-WowConstants.MapHalfSize);
-        writer.Write(WowConstants.TileSize / 4);  // tileWidth = 133.333f
-        writer.Write(WowConstants.TileSize / 4);  // tileHeight = 133.333f
-        writer.Write(tileCount * 16);            // maxTiles = ADTs × 16
-        writer.Write(16384);                     // maxPolys = 1 << 14
+        writer.Write(WowConstants.TileSize / 4);
+        writer.Write(WowConstants.TileSize / 4);
+        writer.Write(tileCount * 16);
+        writer.Write(16384);
     }
 
     private async Task<bool> ProcessTileAsync(uint mapId, int tileX, int tileY, CancellationToken ct)
@@ -116,7 +109,6 @@ public sealed class MmapExtractorService
         var geometry = await LoadTileGeometryAsync(mapId, tileX, tileY, ct);
         if (geometry.Vertices.Length == 0)
             return false;
-
         try
         {
             await BuildSubTilesAsync(mapId, tileX, tileY, geometry, ct);
@@ -139,7 +131,6 @@ public sealed class MmapExtractorService
             {
                 int adjX = centerX + dx;
                 int adjY = centerY + dy;
-
                 if (adjX < 0 || adjX >= 64 || adjY < 0 || adjY >= 64)
                     continue;
 
@@ -149,7 +140,6 @@ public sealed class MmapExtractorService
                 var result = await _adtParser.ParseAsync(adtPath, mapId, adjX, adjY, ct);
                 if (!result.Success)
                     continue;
-
                 var adt = result.Tile;
                 if (adt == null) continue;
                 tiles.Add((adjX, adjY, new[] { adt }));
@@ -186,7 +176,6 @@ public sealed class MmapExtractorService
                     {
                         int idx = z * 9 + x;
                         float h = chunkHeights[idx];
-
                         vertices.Add(chunkOriginX + x * WowConstants.ChunkSize / WowConstants.MCNKVerticesSide);
                         vertices.Add(h);
                         vertices.Add(chunkOriginZ + z * WowConstants.ChunkSize / WowConstants.MCNKVerticesSide);
@@ -198,16 +187,11 @@ public sealed class MmapExtractorService
                     for (int x = 0; x < 8; x++)
                     {
                         int v0 = vertexOffset + z * 9 + x;
-                        int v1 = v0 + 1;
-                        int v2 = v0 + 9;
-                        int v3 = v2 + 1;
-
-                        indices.Add(v0); indices.Add(v2); indices.Add(v1);
-                        indices.Add(v1); indices.Add(v2); indices.Add(v3);
+                        indices.Add(v0); indices.Add(v0 + 9); indices.Add(v0 + 1);
+                        indices.Add(v0 + 1); indices.Add(v0 + 9); indices.Add(v0 + 10);
                         areas.Add(1);
                     }
                 }
-
                 vertexOffset = vertices.Count / 3;
             }
         }
@@ -225,11 +209,14 @@ public sealed class MmapExtractorService
             for (int subX = 0; subX < 4; subX++)
             {
                 ct.ThrowIfCancellationRequested();
-
                 float subOriginX = tileOriginX + subX * WowConstants.SubTileSize;
                 float subOriginZ = tileOriginZ + subY * WowConstants.SubTileSize;
 
-                var navData = BuildNavMeshTileSync(geometry, subX, subY, subOriginX, subOriginZ);
+                // Bug 2 fix: global sub-tile coordinates (0-255 range for a 64×64 map)
+                int globalTileX = adtX * 4 + subX;
+                int globalTileY = adtY * 4 + subY;
+
+                var navData = BuildNavMeshTileSync(geometry, globalTileX, globalTileY, subOriginX, subOriginZ);
                 if (navData != null)
                     await WriteMmtileAsync(mapId, adtX, adtY, subX, subY, navData, ct);
             }
@@ -237,11 +224,7 @@ public sealed class MmapExtractorService
     }
 
     private unsafe byte[]? BuildNavMeshTileSync(
-        TileGeometry geo,
-        int subTileX,
-        int subTileY,
-        float originX,
-        float originZ)
+        TileGeometry geo, int globalTileX, int globalTileY, float originX, float originZ)
     {
         int vertCount = geo.VertexCount;
         int triCount = geo.IndexCount / 3;
@@ -257,24 +240,33 @@ public sealed class MmapExtractorService
             MinRegionArea = 400,
             MergeRegionArea = 1600,
             MaxSimplificationError = 1.3f,
-            TileX = subTileX,
-            TileY = subTileY,
+            TileX = globalTileX,
+            TileY = globalTileY,
             MaxVertsPerPoly = 6
         };
 
         float tileX = originX + WowConstants.SubTileSize;
-        float tileY = originZ + WowConstants.SubTileSize;
+        float tileZ = originZ + WowConstants.SubTileSize;
+
+        // Bug 7 fix: dynamic bounding box from geometry
+        float minY = float.MaxValue, maxY = float.MinValue;
+        for (int v = 1; v < geo.Vertices.Length; v += 3)
+        {
+            if (geo.Vertices[v] < minY) minY = geo.Vertices[v];
+            if (geo.Vertices[v] > maxY) maxY = geo.Vertices[v];
+        }
+        if (minY == float.MaxValue) { minY = 0; maxY = 100f; }
 
         fixed (float* v = geo.Vertices)
         fixed (int* i = geo.Indices)
         fixed (byte* a = geo.Areas)
         {
             p.BoundingBoxMinX = originX;
-            p.BoundingBoxMinY = 0;
+            p.BoundingBoxMinY = minY - 2f;
             p.BoundingBoxMinZ = originZ;
             p.BoundingBoxMaxX = tileX;
-            p.BoundingBoxMaxY = 1000f;
-            p.BoundingBoxMaxZ = tileY;
+            p.BoundingBoxMaxY = maxY + 2f;
+            p.BoundingBoxMaxZ = tileZ;
 
             byte* outData;
             int outSize;
@@ -296,24 +288,25 @@ public sealed class MmapExtractorService
     {
         await Task.Run(() =>
         {
-            string dir = Path.Combine(_outputDir, $"{mapId:D3}");
-            if (!Directory.Exists(dir))
-                Directory.CreateDirectory(dir);
+            // Bug 4 fix: flat output directory, not subfolder per mapId
+            Directory.CreateDirectory(_outputDir);
 
             int globalSubY = adtY * 4 + subY;
             int globalSubX = adtX * 4 + subX;
-
             string fileName = $"{mapId:D3}{globalSubY:D3}{globalSubX:D3}.mmtile";
-            string filePath = Path.Combine(dir, fileName);
+            string filePath = Path.Combine(_outputDir, fileName);
 
             using var stream = new FileStream(filePath, FileMode.Create, FileAccess.Write);
             using var writer = new BinaryWriter(stream);
-
-            writer.Write(MagicBytes.MmapTileMagic);
+            writer.Write(MagicBytes.MmapMagic);
             writer.Write(MagicBytes.DtNavMeshVersion);
             writer.Write(MagicBytes.MmapVersion);
             writer.Write((uint)navData.Length);
             writer.Write((byte)1);
+            // Bug 3 fix: 3 bytes padding to reach 20-byte header (4+4+4+4+1+3)
+            writer.Write((byte)0);
+            writer.Write((byte)0);
+            writer.Write((byte)0);
             writer.Write(navData);
         }, ct);
     }
@@ -326,7 +319,6 @@ public readonly struct TileGeometry
     public float[] Vertices { get; }
     public int[] Indices { get; }
     public byte[] Areas { get; }
-
     public int VertexCount => Vertices.Length / 3;
     public int IndexCount => Indices.Length;
 
