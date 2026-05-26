@@ -68,8 +68,16 @@ public struct AdtMcnk
 
 public struct AdtMcvt
 {
-    public const int VerticesSide = 9;
-    public const int TotalVertices = 145;
+    public const int V9PerRow = 9;
+    public const int V8PerRow = 8;
+    public const int TotalVertices = V9PerRow * V9PerRow + V8PerRow * V8PerRow;
+    public const int Stride = V9PerRow + V8PerRow;
+
+    public static float GetV9(ReadOnlySpan<float> chunkData, int z, int x) =>
+        chunkData[z * Stride + x];
+
+    public static float GetV8(ReadOnlySpan<float> chunkData, int z, int x) =>
+        chunkData[z * Stride + V9PerRow + x];
 }
 
 public struct AdtMcnr

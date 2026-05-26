@@ -20,8 +20,7 @@ public sealed class RoadExtractorService
 
     private static readonly string[] RoadPatterns =
     {
-        "road", "cobblestone", "path_stone", "bridgefloor",
-        "cobble", "stone", "pave", "flagstone", "plank", "boards"
+        "road", "cobblestone", "path_stone", "bridgefloor"
     };
 
     public RoadExtractorService(

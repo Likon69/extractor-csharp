@@ -172,8 +172,7 @@ public sealed class MmapExtractorService
                 {
                     for (int x = 0; x < 9; x++)
                     {
-                        int idx = z * 9 + x;
-                        float h = chunkHeights[idx];
+                        float h = AdtMcvt.GetV9(chunkHeights, z, x);
                         vertices.Add(chunkOriginX + x * WowConstants.ChunkSize / WowConstants.MCNKVerticesSide);
                         vertices.Add(h);
                         vertices.Add(chunkOriginZ + z * WowConstants.ChunkSize / WowConstants.MCNKVerticesSide);
@@ -187,7 +186,7 @@ public sealed class MmapExtractorService
                         int v0 = vertexOffset + z * 9 + x;
                         indices.Add(v0); indices.Add(v0 + 9); indices.Add(v0 + 1);
                         indices.Add(v0 + 1); indices.Add(v0 + 9); indices.Add(v0 + 10);
-                        areas.Add(1);
+                        areas.Add(adt.GetChunkAreaType(chunkIdx));
                     }
                 }
                 vertexOffset = vertices.Count / 3;

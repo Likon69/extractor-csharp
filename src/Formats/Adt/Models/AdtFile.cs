@@ -62,6 +62,12 @@ public sealed class AdtFile
     }
 
     /// <summary>
+    /// Gets V9 (outer) heights for a specific MCNK chunk for grid (z,x).
+    /// </summary>
+    public static float GetV8(ReadOnlySpan<float> chunkData, int z, int x) =>
+        chunkData[z * AdtMcvt.Stride + AdtMcvt.V9PerRow + x];
+
+    /// <summary>
     /// Gets all heights for a specific MCNK chunk.
     /// </summary>
     /// <param name="chunkIndex">MCNK chunk index (0-255).</param>
@@ -136,10 +142,10 @@ public sealed class AdtFile
         float fy = vertexY - vy0;
 
         // H0 = top-left, H1 = top-right, H2 = bottom-left, H3 = bottom-right
-        float h00 = heights[vy0 * 9 + vx0];
-        float h10 = heights[vy0 * 9 + vx1];
-        float h01 = heights[vy1 * 9 + vx0];
-        float h11 = heights[vy1 * 9 + vx1];
+        float h00 = AdtMcvt.GetV9(heights, vy0, vx0);
+        float h10 = AdtMcvt.GetV9(heights, vy0, vx1);
+        float h01 = AdtMcvt.GetV9(heights, vy1, vx0);
+        float h11 = AdtMcvt.GetV9(heights, vy1, vx1);
 
         return h00 * (1 - fx) * (1 - fy) +
                h10 * fx * (1 - fy) +
@@ -173,13 +179,34 @@ public sealed class AdtFile
         _chunkTextureIds = chunkTextureIds ?? new uint[256];
     }
 
-    /// <summary>
-    /// Gets the primary texture ID used by a specific MCNK chunk.
-    /// </summary>
+    /// <summary>Returns true if the given texture name contains road-like patterns.</summary>
+    public static bool IsRoadTexture(string textureName)
+    {
+        if (string.IsNullOrEmpty(textureName)) return false;
+        string lower = textureName.ToLowerInvariant();
+        return lower.Contains("road") || lower.Contains("cobblestone")
+            || lower.Contains("path_stone") || lower.Contains("bridgefloor");
+    }
+
+    /// <summary>Returns the NavTerrain area type for a chunk (NAV_GROUND, NAV_WATER, or NAV_ROAD).</summary>
+    /// <param name="chunkIndex">MCNK chunk index (0-255).</param>
+    public byte GetChunkAreaType(int chunkIndex)
+    {
+        if (chunkIndex < 0 || chunkIndex >= 256)
+            return 1;
+
+        ref readonly var liquid = ref GetLiquidData(chunkIndex);
+        if (liquid.HasLiquid && liquid.PrimaryType != LiquidType.Magma)
+            return 2; // NAV_WATER
+        uint texId = _chunkTextureIds[chunkIndex];
+        if (texId < TextureNames.Length && IsRoadTexture(TextureNames[(int)texId]))
+            return 4; // NAV_ROAD
+        return 1; // NAV_GROUND
+    }
+
+    /// <summary>Gets the primary texture ID of a MCNK chunk (MCLY index 0).</summary>
     public uint GetChunkTextureId(int chunkIndex) =>
-        chunkIndex >= 0 && chunkIndex < 256 && _chunkTextureIds != null
-            ? _chunkTextureIds[chunkIndex]
-            : 0;
+        (uint)(chunkIndex >= 0 && chunkIndex < 256 ? _chunkTextureIds[chunkIndex] : 0);
 }
 
 /// <summary>
