@@ -61,15 +61,10 @@ public sealed class AdtFile
     }
 
     /// <summary>
-    /// Gets all 145 heights for a specific chunk.
+    /// Gets all heights for a specific MCNK chunk.
     /// </summary>
     /// <param name="chunkIndex">MCNK chunk index (0-255).</param>
-    /// <returns>Span of 145 height values.</returns>
-    /// <summary>
-    /// Gets heights for a specific MCNK chunk (9x9 grid = 81 vertices).
-    /// </summary>
-    /// <param name="chunkIndex">MCNK chunk index (0-255).</param>
-    /// <returns>Span of 81 float heights for this chunk.</returns>
+    /// <returns>Span of height values for this chunk.</returns>
     /// <remarks>Returned span is valid only while the AdtFile is alive. Do not store.</remarks>
     public Span<float> GetChunkHeights(int chunkIndex)
     {

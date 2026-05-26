@@ -97,22 +97,18 @@ public sealed class MmapExtractorService
         using var stream = new FileStream(mmapPath, FileMode.Create, FileAccess.Write);
         using var writer = new BinaryWriter(stream);
 
-        var origin = GetMapOrigin(mapId);
-
-        writer.Write(origin[0]);
-        writer.Write(origin[1]);
-        writer.Write(origin[2]);
-        writer.Write(WowConstants.SubTileSize * 16);
-        writer.Write(WowConstants.SubTileSize * 16);
-        writer.Write(tileCount * 16);
-        writer.Write(tileCount * 16 * 3);
-    }
-
-    private float[] GetMapOrigin(uint mapId)
-    {
-        float baseX = WowConstants.MapHalfSize;
-        float baseZ = WowConstants.MapHalfSize;
-        return new float[] { baseX, 0, baseZ };
+        // dtNavMeshParams: origin is the bmin of the map
+        // For origin, use (0, 0) since map coordinates start at -MapHalfSize
+        // tileWidth/tileHeight = full ADT tile size (not sub-tile)
+        // maxTiles = number of ADT tiles (not sub-tiles)
+        // maxPolys = 1 << DT_POLY_BITS (DT_POLY_BITS=14, so 16384 per tile)
+        writer.Write(-WowConstants.MapHalfSize);  // origin X
+        writer.Write(0f);                         // origin Y
+        writer.Write(-WowConstants.MapHalfSize); // origin Z
+        writer.Write(WowConstants.TileSize);     // tileWidth = 533.333f
+        writer.Write(WowConstants.TileSize);     // tileHeight = 533.333f
+        writer.Write(tileCount);                 // maxTiles = number of ADTs
+        writer.Write(16384);                     // maxPolys = 1 << 14 per tile
     }
 
     private async Task<bool> ProcessTileAsync(uint mapId, int tileX, int tileY, CancellationToken ct)

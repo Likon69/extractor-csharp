@@ -159,8 +159,12 @@ bool BuildTile(
 
     for (int i = 0; i < pmesh->npolys; i++)
     {
+        // RC_WALKABLE_AREA = 63 = default area, set to 0 (NAV_GROUND)
+        // NAV_WATER should be set based on liquid detection
         if (pmesh->areas[i] == RC_WALKABLE_AREA)
             pmesh->areas[i] = 0;
+        
+        // Default to NAV_GROUND (0x01), NAV_WATER = 0x04 for liquid areas
         pmesh->flags[i] = 1;
     }
 
@@ -184,8 +188,7 @@ bool BuildTile(
     memcpy(navParams.bmin, pmesh->bmin, sizeof(float) * 3);
     memcpy(navParams.bmax, pmesh->bmax, sizeof(float) * 3);
 
-    navParams.cs = params->CellSize;
-    navParams.ch = params->CellHeight;
+    // World units (not cell-based)
     navParams.walkableHeight = params->WalkableHeight * params->CellHeight;
     navParams.walkableRadius = params->WalkableRadius * params->CellSize;
     navParams.walkableClimb = params->WalkableClimb * params->CellHeight;
