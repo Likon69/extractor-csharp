@@ -3,10 +3,10 @@ using System.Runtime.InteropServices;
 namespace MaNGOS.Extractor.Formats.Dbc;
 
 /// <summary>
-/// Map.dbc row size = 140 bytes (Map 3.3.5a).
-/// Field 0 = ID, Fields 1+ are offsets into string block.
+/// Map.dbc row size = 504 bytes (WotLK 3.3.5a build 12340 — 126 fields × 4 bytes).
+/// Field 0 = ID, Field 1 = InternalName (string block offset), Field 2 = MapType.
 /// </summary>
-[StructLayout(LayoutKind.Sequential, Size = 140)]
+[StructLayout(LayoutKind.Sequential, Size = 504)]
 public struct MapDbcRow
 {
     public uint Id;
