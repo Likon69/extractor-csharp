@@ -85,7 +85,7 @@ public sealed class WmoParser
             switch (chunkMagic)
             {
                 case MagicBytes.Mogn: // Group names
-                    ParseMogn(reader, groupNames);
+                    ParseMogn(reader, chunkSize, groupNames);
                     break;
 
                 case MagicBytes.Motx: // Texture names
@@ -229,15 +229,14 @@ public sealed class WmoParser
             liquid);
     }
 
-    private void ParseMogn(SpanReader reader, List<string> names)
+    private void ParseMogn(SpanReader reader, uint chunkSize, List<string> names)
     {
-        // Null-terminated strings
-        while (reader.Remaining > 0)
+        int endPos = reader.Position + (int)chunkSize;
+        while (reader.Position < endPos && reader.Remaining > 8)
         {
             string name = reader.ReadCString(260);
-            if (string.IsNullOrEmpty(name))
-                break;
-            names.Add(name);
+            if (!string.IsNullOrEmpty(name))
+                names.Add(name);
         }
     }
 

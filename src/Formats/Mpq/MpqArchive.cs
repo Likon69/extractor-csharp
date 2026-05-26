@@ -11,6 +11,7 @@ public sealed class MpqArchive : IArchiveReader
     private IntPtr _handle;
     private readonly ILogger _logger;
     private readonly ConcurrentDictionary<string, ReadOnlyMemory<byte>> _cache;
+    private readonly int _maxCacheEntries = 256;
     private bool _disposed;
 
     public string ArchiveName { get; }
@@ -84,7 +85,16 @@ public sealed class MpqArchive : IArchiveReader
                 data = copy;
 
                 if (read < 1024 * 1024)
+                {
+                    if (_cache.Count >= _maxCacheEntries)
+                    {
+                        // Evict oldest entries (FIFO approximation)
+                        var keysToRemove = _cache.Keys.Take(_cache.Count / 2).ToList();
+                        foreach (var key in keysToRemove)
+                            _cache.TryRemove(key, out _);
+                    }
                     _cache.TryAdd(path, data);
+                }
 
                 return true;
             }
