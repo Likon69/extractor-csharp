@@ -1,4 +1,5 @@
 using System.IO;
+using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Logging;
 using MaNGOS.Extractor.Core.Constants;
 using MaNGOS.Extractor.Formats.Adt.Models;
@@ -32,28 +33,27 @@ public sealed class MapFileWriter
         using var stream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
         using var writer = new BinaryWriter(stream);
 
-        // Header: 11 uint32 fields = 44 bytes (matching MaNGOS GridMap.cpp)
-        uint headerOffset = 44;
-        uint areaMapOffset = headerOffset;
-        uint heightMapOffset = areaMapOffset + 8 + 256 * 2;
+        // 11 uint32 header = 44 bytes (MaNGOS GridMap.cpp)
+        uint offsets = 44; // areaMapOffset = 44 (fixed, right after header)
+        uint heightMapOffset = offsets + 8 + 256 * 2;
         uint liquidMapOffset = heightMapOffset + 16 + (129 * 129 + 128 * 128) * 4;
         uint holesOffset = liquidMapOffset + 16;
         uint areaMapSize = 8 + 256 * 2;
         uint heightMapSize = 16 + (129 * 129 + 128 * 128) * 4;
-        uint liquidMapSize = 16; // single header, no liquid data
+        uint liquidMapSize = 16;
         uint holesSize = 256 * 2;
 
-        writer.Write(MagicBytes.MapMagicWotlk);
-        writer.Write(1u);
-        writer.Write(WowConstants.TargetBuild);
-        writer.Write(areaMapOffset);
-        writer.Write(areaMapSize);
+        writer.Write(0x5350414Du);             // "MAPS" — mapMagic
+        writer.Write(MagicBytes.MapMagicWotlk); // "v1.5" — 0x76312E35
+        writer.Write(WowConstants.TargetBuild); // 12340
+        writer.Write(offsets);                  // areaMapOffset = 44
+        writer.Write(areaMapSize);              // size of area section
         writer.Write(heightMapOffset);
         writer.Write(heightMapSize);
         writer.Write(liquidMapOffset);
-        writer.Write(liquidMapSize);
+        writer.Write(liquidMapSize);            // 16 (header only)
         writer.Write(holesOffset);
-        writer.Write(holesSize);
+        writer.Write(holesSize);                // 16 bytes holes
 
         // Area section: GridMapAreaHeader(8 bytes) + uint16[16][16]
         writer.Write(0x47444944u); // 'GRID' fourcc
@@ -69,7 +69,7 @@ public sealed class MapFileWriter
         writer.Write(tile.MaxHeight);
 
         var v9 = BuildV9Heights(tile);
-        var v8 = BuildV8Heights(v9);
+        var v8 = BuildV8Heights(tile);
 
         foreach (var h in v9) writer.Write(h);
         foreach (var h in v8) writer.Write(h);
@@ -78,10 +78,7 @@ public sealed class MapFileWriter
         writer.Write(MagicBytes.LiquidMapMagic);
         writer.Write((ushort)0); // flags
         writer.Write((ushort)0); // liquidType
-        writer.Write((byte)0); // offsetX
-        writer.Write((byte)0); // offsetY
-        writer.Write((byte)0); // width
-        writer.Write((byte)0); // height
+        writer.Write((byte)0); writer.Write((byte)0); writer.Write((byte)0); writer.Write((byte)0);
         writer.Write(0f); // liquidLevel
 
         // Holes section: uint16[16][16]
@@ -103,7 +100,6 @@ public sealed class MapFileWriter
         {
             for (int chunkX = 0; chunkX < 16; chunkX++)
             {
-                // 145 floats per chunk: V9[9×9] interleaved with V8[8×8]
                 var chunkData = tile.HeightMap.AsSpan(
                     chunkZ * 16 * AdtMcvt.TotalVertices + chunkX * AdtMcvt.TotalVertices,
                     AdtMcvt.TotalVertices);
@@ -111,7 +107,6 @@ public sealed class MapFileWriter
                 int vBaseZ = chunkZ * 8;
                 int vBaseX = chunkX * 8;
 
-                // V9: outer grid vertices (9×9 per chunk)
                 for (int z = 0; z < 9; z++)
                     for (int x = 0; x < 9; x++)
                         heights[(vBaseZ + z) * 129 + (vBaseX + x)] = AdtMcvt.GetV9(chunkData, z, x);
@@ -121,17 +116,33 @@ public sealed class MapFileWriter
         return heights;
     }
 
-    // V8 heights: interpolate from the 4 surrounding V9 corners (MaNGOS original method)
-    private static float[] BuildV8Heights(float[] v9)
+    private static float[] BuildV8Heights(MapTile tile)
     {
         var heights = new float[128 * 128];
-        for (int z = 0; z < 128; z++)
-            for (int x = 0; x < 128; x++)
+        if (tile.HeightMap == null || tile.HeightMap.Length < 256 * AdtMcvt.TotalVertices)
+        {
+            Array.Fill(heights, 0f);
+            return heights;
+        }
+
+        for (int chunkZ = 0; chunkZ < 16; chunkZ++)
+        {
+            for (int chunkX = 0; chunkX < 16; chunkX++)
             {
-                int v9Base = z * 129 + x;
-                heights[z * 128 + x] = (v9[v9Base] + v9[v9Base + 1]
-                    + v9[v9Base + 129] + v9[v9Base + 130]) * 0.25f;
+                var chunkData = tile.HeightMap.AsSpan(
+                    chunkZ * 16 * AdtMcvt.TotalVertices + chunkX * AdtMcvt.TotalVertices,
+                    AdtMcvt.TotalVertices);
+
+                int vBaseZ = chunkZ * 8;
+                int vBaseX = chunkX * 8;
+
+                // V8: inner grid vertices, read directly from interleaved data
+                for (int z = 0; z < 8; z++)
+                    for (int x = 0; x < 8; x++)
+                        heights[(vBaseZ + z) * 128 + (vBaseX + x)] = AdtMcvt.GetV8(chunkData, z, x);
             }
+        }
+
         return heights;
     }
 

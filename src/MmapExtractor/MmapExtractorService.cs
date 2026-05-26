@@ -1,4 +1,5 @@
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
 using Microsoft.Extensions.Logging;
 using MaNGOS.Extractor.Core.Constants;
@@ -20,13 +21,15 @@ public sealed class MmapExtractorService
     private readonly string _outputDir;
     private readonly RecastConfig _recastConfig;
     private readonly int _maxDegreeOfParallelism;
+    private readonly GoSpawn[] _goSpawns;
 
     public MmapExtractorService(
         IArchiveReader archive,
         ILoggerFactory loggerFactory,
         string outputDir,
         RecastConfig recastConfig,
-        int maxDegreeOfParallelism = 1)
+        int maxDegreeOfParallelism = 1,
+        string? goSpawnsPath = null)
     {
         _archive = archive;
         _logger = loggerFactory.CreateLogger<MmapExtractorService>();
@@ -35,6 +38,9 @@ public sealed class MmapExtractorService
         _outputDir = outputDir;
         _recastConfig = recastConfig;
         _maxDegreeOfParallelism = Math.Max(1, maxDegreeOfParallelism);
+        _goSpawns = !string.IsNullOrEmpty(goSpawnsPath)
+            ? GoSpawnsReader.Read(goSpawnsPath)
+            : Array.Empty<GoSpawn>();
         if (!Directory.Exists(outputDir))
             Directory.CreateDirectory(outputDir);
     }
@@ -91,8 +97,6 @@ public sealed class MmapExtractorService
         using var stream = new FileStream(mmapPath, FileMode.Create, FileAccess.Write);
         using var writer = new BinaryWriter(stream);
 
-        // dtNavMeshParams (28 bytes) — raw struct, no magic/version prefix
-        // MoveMap.cpp reads: fread(&params, sizeof(dtNavMeshParams), 1, file)
         writer.Write(-WowConstants.MapHalfSize);
         writer.Write(0f);
         writer.Write(-WowConstants.MapHalfSize);
@@ -144,7 +148,58 @@ public sealed class MmapExtractorService
             }
         }
 
-        return ExtrudeTileGeometry(mapId, centerX, centerY, tiles);
+        if (tiles.Count == 0)
+            return default;
+
+        var geo = ExtrudeTileGeometry(mapId, centerX, centerY, tiles);
+
+        // Add GameObject spawns for this map/tile
+        if (_goSpawns.Length > 0)
+        {
+            float tileMinX = centerX * WowConstants.TileSize - WowConstants.MapHalfSize;
+            float tileMaxX = tileMinX + WowConstants.TileSize;
+            float tileMinZ = centerY * WowConstants.TileSize - WowConstants.MapHalfSize;
+            float tileMaxZ = tileMinZ + WowConstants.TileSize;
+
+            var goVerts = new List<float>();
+            var goIndices = new List<int>();
+            var goAreas = new List<byte>();
+
+            foreach (var go in _goSpawns)
+            {
+                if (go.MapId != mapId)
+                    continue;
+                if (go.PosX < tileMinX || go.PosX > tileMaxX
+                    || go.PosZ < tileMinZ || go.PosZ > tileMaxZ)
+                    continue;
+
+                int baseIdx = geo.Vertices.Length / 3;
+                goVerts.Add(go.PosX); goVerts.Add(go.PosY); goVerts.Add(go.PosZ);
+                goVerts.Add(go.PosX + 0.5f); goVerts.Add(go.PosY); goVerts.Add(go.PosZ);
+                goVerts.Add(go.PosX + 0.5f); goVerts.Add(go.PosY); goVerts.Add(go.PosZ + 0.5f);
+                goVerts.Add(go.PosX); goVerts.Add(go.PosY); goVerts.Add(go.PosZ + 0.5f);
+
+                goIndices.Add(baseIdx); goIndices.Add(baseIdx + 1); goIndices.Add(baseIdx + 2);
+                goIndices.Add(baseIdx); goIndices.Add(baseIdx + 2); goIndices.Add(baseIdx + 3);
+                goAreas.Add(13); // NAV_BLOCKED
+            }
+
+            if (goVerts.Count > 0)
+            {
+                var combinedVerts = new float[geo.Vertices.Length + goVerts.Count];
+                var combinedIdx = new int[geo.Indices.Length + goIndices.Count];
+                var combinedAreas = new byte[geo.Areas.Length + goAreas.Count];
+                geo.Vertices.CopyTo(combinedVerts, 0);
+                goVerts.ToArray().CopyTo(combinedVerts, geo.Vertices.Length);
+                geo.Indices.CopyTo(combinedIdx, 0);
+                goIndices.ToArray().CopyTo(combinedIdx, geo.Indices.Length);
+                geo.Areas.CopyTo(combinedAreas, 0);
+                goAreas.ToArray().CopyTo(combinedAreas, geo.Areas.Length);
+                geo = new TileGeometry(combinedVerts, combinedIdx, combinedAreas);
+            }
+        }
+
+        return geo;
     }
 
     private static TileGeometry ExtrudeTileGeometry(uint mapId, int centerX, int centerY, List<(int X, int Y, AdtFile[] Tile)> tiles)
@@ -209,7 +264,6 @@ public sealed class MmapExtractorService
                 float subOriginX = tileOriginX + subX * WowConstants.SubTileSize;
                 float subOriginZ = tileOriginZ + subY * WowConstants.SubTileSize;
 
-                // Bug 2 fix: global sub-tile coordinates (0-255 range for a 64×64 map)
                 int globalTileX = adtX * 4 + subX;
                 int globalTileY = adtY * 4 + subY;
 
@@ -245,14 +299,13 @@ public sealed class MmapExtractorService
         float tileX = originX + WowConstants.SubTileSize;
         float tileZ = originZ + WowConstants.SubTileSize;
 
-        // Bug 7 fix: dynamic bounding box from geometry
-        float minY = float.MaxValue, maxY = float.MinValue;
+        float minY = float.MaxValue, maxYh = float.MinValue;
         for (int v = 1; v < geo.Vertices.Length; v += 3)
         {
             if (geo.Vertices[v] < minY) minY = geo.Vertices[v];
-            if (geo.Vertices[v] > maxY) maxY = geo.Vertices[v];
+            if (geo.Vertices[v] > maxYh) maxYh = geo.Vertices[v];
         }
-        if (minY == float.MaxValue) { minY = 0; maxY = 100f; }
+        if (minY == float.MaxValue) { minY = 0; maxYh = 100f; }
 
         fixed (float* v = geo.Vertices)
         fixed (int* i = geo.Indices)
@@ -262,7 +315,7 @@ public sealed class MmapExtractorService
             p.BoundingBoxMinY = minY - 2f;
             p.BoundingBoxMinZ = originZ;
             p.BoundingBoxMaxX = tileX;
-            p.BoundingBoxMaxY = maxY + 2f;
+            p.BoundingBoxMaxY = maxYh + 2f;
             p.BoundingBoxMaxZ = tileZ;
 
             byte* outData;
@@ -285,7 +338,6 @@ public sealed class MmapExtractorService
     {
         await Task.Run(() =>
         {
-            // Bug 4 fix: flat output directory, not subfolder per mapId
             Directory.CreateDirectory(_outputDir);
 
             int globalSubY = adtY * 4 + subY;
@@ -300,7 +352,6 @@ public sealed class MmapExtractorService
             writer.Write(MagicBytes.MmapVersion);
             writer.Write((uint)navData.Length);
             writer.Write((byte)1);
-            // Bug 3 fix: 3 bytes padding to reach 20-byte header (4+4+4+4+1+3)
             writer.Write((byte)0);
             writer.Write((byte)0);
             writer.Write((byte)0);
