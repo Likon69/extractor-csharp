@@ -1,0 +1,25 @@
+# Build outputs
+bin/
+obj/
+*.dll
+*.exe
+*.pdb
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Logs
+*.log
+
+# Config with secrets
+ExtractorConfig.json
+
+# Native build artifacts
+native/RecastBuilderDll/obj/
+native/RecastBuilderDll/bin/
+
+# Test outputs
+TestResults/

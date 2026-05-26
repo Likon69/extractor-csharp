@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>12.0</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>MaNGOS.Extractor</RootNamespace>
+    <AssemblyName>MaNGOS.Extractor</AssemblyName>
+    <Version>1.0.0</Version>
+    <Authors>MaNGOS Extractor Team</Authors>
+    <Product>MaNGOS Unified Extractor</Product>
+    <Description>World of Warcraft data extraction tools for MaNGOS server (WotLK 3.3.5a)</Description>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <Optimize>true</Optimize>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.0" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\native\RecastBuilderDll\bin\$(Configuration)\RecastBuilderDll.dll" 
+             Condition="Exists('..\native\RecastBuilderDll\bin\$(Configuration)\RecastBuilderDll.dll')"
+             CopyToOutputDirectory="PreserveNewest" Link="RecastBuilderDll.dll" />
+  </ItemGroup>
+
+</Project>

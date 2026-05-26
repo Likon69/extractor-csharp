@@ -1,0 +1,153 @@
+<Window x:Class="MaNGOS.Extractor.UI.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:MaNGOS.Extractor.UI.ViewModels"
+        xmlns:ctrl="clr-namespace:MaNGOS.Extractor.UI.Controls"
+        Title="MaNGOS Extractor - WotLK 3.3.5a" Height="700" Width="1000">
+    <Window.DataContext>
+        <vm:MainViewModel/>
+    </Window.DataContext>
+    <Grid Margin="8">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="120"/>
+        </Grid.RowDefinitions>
+
+        <!-- Toolbar -->
+        <Border Grid.Row="0" Background="#F0F0F0" Padding="8" Margin="0,0,0,8">
+            <StackPanel Orientation="Horizontal">
+                <Button Content="▶ Démarrer" Command="{Binding StartCommand}" IsEnabled="{Binding CanStart}"/>
+                <Button Content="■ Stop" Command="{Binding StopCommand}" IsEnabled="{Binding CanStop}"/>
+                <Separator Width="20"/>
+                <Label Content="Phase:" VerticalAlignment="Center"/>
+                <ComboBox Width="120" ItemsSource="{Binding PhaseNames}" SelectedItem="{Binding SelectedPhase}"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Main content: left panel + right grid -->
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="220"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Left panel: Maps + Recast params -->
+            <Border Grid.Column="0" BorderBrush="#CCC" BorderThickness="1" Margin="0,0,8,0">
+                <ScrollViewer>
+                    <StackPanel Margin="8">
+                        <!-- Maps section -->
+                        <TextBlock Text="CARTES" FontWeight="Bold" Margin="0,0,0,8"/>
+                        <ItemsControl ItemsSource="{Binding SelectedMaps}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <CheckBox IsChecked="{Binding IsSelected}" Margin="0,2">
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding MapId}" Width="40"/>
+                                            <TextBlock Text="{Binding MapName}"/>
+                                        </StackPanel>
+                                    </CheckBox>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+
+                        <Separator Margin="0,16"/>
+
+                        <!-- Recast params section -->
+                        <TextBlock Text="PARAMÈTRES RECAST" FontWeight="Bold" Margin="0,0,0,8"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="80"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <Label Grid.Row="0" Grid.Column="0" Content="CellSize:"/>
+                            <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding CellSize, UpdateSourceTrigger=PropertyChanged}"/>
+
+                            <Label Grid.Row="1" Grid.Column="0" Content="CellHeight:"/>
+                            <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding CellHeight, UpdateSourceTrigger=PropertyChanged}"/>
+
+                            <Label Grid.Row="2" Grid.Column="0" Content="Slope:"/>
+                            <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding WalkableSlopeAngle, UpdateSourceTrigger=PropertyChanged}"/>
+
+                            <Label Grid.Row="3" Grid.Column="0" Content="Threads:"/>
+                            <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding ThreadCount, UpdateSourceTrigger=PropertyChanged}"/>
+
+                            <Label Grid.Row="4" Grid.Column="0" Content="BigBase:"/>
+                            <CheckBox Grid.Row="4" Grid.Column="1" IsChecked="{Binding BigBaseUnit}" VerticalAlignment="Center"/>
+
+                            <Label Grid.Row="5" Grid.Column="0" Content="Locale:"/>
+                            <ComboBox Grid.Row="5" Grid.Column="1" ItemsSource="{Binding Locales}" SelectedItem="{Binding SelectedLocale}"/>
+                        </Grid>
+
+                        <Separator Margin="0,16"/>
+
+                        <!-- Path configuration -->
+                        <TextBlock Text="CHEMINS" FontWeight="Bold" Margin="0,0,0,8"/>
+                        <Label Content="WoW Client:"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBox Grid.Column="0" Text="{Binding WowClientPath, UpdateSourceTrigger=PropertyChanged}"/>
+                            <Button Grid.Column="1" Content="..." Width="30" Command="{Binding BrowseWowCommand}"/>
+                        </Grid>
+
+                        <Label Content="Output:"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBox Grid.Column="0" Text="{Binding OutputPath, UpdateSourceTrigger=PropertyChanged}"/>
+                            <Button Grid.Column="1" Content="..." Width="30" Command="{Binding BrowseOutputCommand}"/>
+                        </Grid>
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+
+            <!-- Right panel: Map grid -->
+            <Border Grid.Column="1" BorderBrush="#CCC" BorderThickness="1">
+                <ctrl:MapGridControl ViewModel="{Binding TileGrid}"/>
+            </Border>
+        </Grid>
+
+        <!-- Progress bar -->
+        <Grid Grid.Row="2" Margin="0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <ProgressBar Grid.Column="0" Value="{Binding Progress}" Maximum="100" Height="20"/>
+            <TextBlock Grid.Column="1" Margin="8,0,0,0">
+                <Run Text="{Binding ProcessedTiles}"/>
+                <Run Text="/"/>
+                <Run Text="{Binding TotalTiles}"/>
+                <Run Text=" tiles"/>
+            </TextBlock>
+        </Grid>
+
+        <!-- Log output -->
+        <Border Grid.Row="3" BorderBrush="#CCC" BorderThickness="1" Background="#1E1E1E">
+            <ScrollViewer>
+                <ItemsControl ItemsSource="{Binding LogMessages}" Padding="8">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding Text}" Foreground="{Binding Color}" FontFamily="Consolas" FontSize="11"/>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+        </Border>
+    </Grid>
+</Window>
