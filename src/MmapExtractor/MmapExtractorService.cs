@@ -91,16 +91,14 @@ public sealed class MmapExtractorService
         using var stream = new FileStream(mmapPath, FileMode.Create, FileAccess.Write);
         using var writer = new BinaryWriter(stream);
 
-        writer.Write(MagicBytes.MmapMagic);
-        writer.Write(MagicBytes.DtNavMeshVersion);
-        writer.Write(MagicBytes.MmapVersion);
-        writer.Write(tileCount);
+        // dtNavMeshParams (28 bytes) — raw struct, no magic/version prefix
+        // MoveMap.cpp reads: fread(&params, sizeof(dtNavMeshParams), 1, file)
         writer.Write(-WowConstants.MapHalfSize);
         writer.Write(0f);
         writer.Write(-WowConstants.MapHalfSize);
-        writer.Write(WowConstants.TileSize / 4);
-        writer.Write(WowConstants.TileSize / 4);
-        writer.Write(tileCount * 16);
+        writer.Write(WowConstants.SubTileSize);
+        writer.Write(WowConstants.SubTileSize);
+        writer.Write((int)(tileCount * 16));
         writer.Write(16384);
     }
 
