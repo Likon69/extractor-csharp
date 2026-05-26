@@ -9,15 +9,6 @@
 
 #include <cstring>
 
-static rcContext* s_ctx = nullptr;
-
-static rcContext* getContext()
-{
-    if (!s_ctx)
-        s_ctx = rcAllocContext();
-    return s_ctx;
-}
-
 extern "C"
 {
 
@@ -34,7 +25,8 @@ bool BuildTile(
     *outData = nullptr;
     *outSize = 0;
 
-    rcContext* ctx = getContext();
+    // Allocate local context per call (no static state)
+    rcContext* ctx = rcAllocContext();
 
     float bmin[3] = { params->BoundingBoxMinX, params->BoundingBoxMinY, params->BoundingBoxMinZ };
     float bmax[3] = { params->BoundingBoxMaxX, params->BoundingBoxMaxY, params->BoundingBoxMaxZ };
@@ -211,6 +203,7 @@ bool BuildTile(
 
     rcFreePolyMeshDetail(dmesh);
     rcFreePolyMesh(pmesh);
+    rcFreeContext(ctx);
 
     *outData = navData;
     *outSize = navDataSize;

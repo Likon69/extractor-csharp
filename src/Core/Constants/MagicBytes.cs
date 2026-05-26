@@ -72,14 +72,10 @@ public static class MagicBytes
     public const uint Movb = 0x4D4F5642;
     public const uint Moxv = 0x4D4F5856;
     public const uint Moby = 0x4D4F4259;
-    public const uint Molv_v = 0x4D4F4C56;
     public const uint Liqu = 0x4C495155;
     public const uint Lmvw = 0x4C4D5657;
     public const uint Lmvw_v = 0x4C4D5657;
     public const uint Lvlu = 0x4C564C55;
-
-    public const uint Mver_wmo = 0x4D564552;
-    public const uint Mver_m2 = 0x4D564552;
 
     public const uint DbcMagic = 0x43424457;
 

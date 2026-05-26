@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyDescriptionAttribute("World of Warcraft data extraction tools for MaNGOS server (WotLK 3.3.5a)")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+670a40702cb8f53096cafc416b6ccd7efa052ac0")]
 [assembly: System.Reflection.AssemblyProductAttribute("MaNGOS Unified Extractor")]
 [assembly: System.Reflection.AssemblyTitleAttribute("MaNGOS.Extractor")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

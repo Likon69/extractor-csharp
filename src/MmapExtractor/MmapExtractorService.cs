@@ -84,7 +84,35 @@ public sealed class MmapExtractorService
         });
 
         _logger.LogInformation("Mmap extraction complete: {Success}/{Total} tiles", successCount, tiles.Count);
+
+        // Write .mmap header file with dtNavMeshParams
+        WriteMmapHeader(mapId, (uint)tiles.Count);
+
         return successCount;
+    }
+
+    private void WriteMmapHeader(uint mapId, uint tileCount)
+    {
+        string mmapPath = Path.Combine(_outputDir, $"{mapId:D3}.mmap");
+        using var stream = new FileStream(mmapPath, FileMode.Create, FileAccess.Write);
+        using var writer = new BinaryWriter(stream);
+
+        var origin = GetMapOrigin(mapId);
+
+        writer.Write(origin[0]);
+        writer.Write(origin[1]);
+        writer.Write(origin[2]);
+        writer.Write(WowConstants.SubTileSize * 16);
+        writer.Write(WowConstants.SubTileSize * 16);
+        writer.Write(tileCount * 16);
+        writer.Write(tileCount * 16 * 3);
+    }
+
+    private float[] GetMapOrigin(uint mapId)
+    {
+        float baseX = WowConstants.MapHalfSize;
+        float baseZ = WowConstants.MapHalfSize;
+        return new float[] { baseX, 0, baseZ };
     }
 
     private async Task<bool> ProcessTileAsync(uint mapId, int tileX, int tileY, CancellationToken ct)

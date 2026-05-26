@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "dgSpecHash": "x/usM1XW02c=",
+  "dgSpecHash": "5f5XEm9h1zU=",
   "success": true,
   "projectFilePath": "C:\\Users\\Texy6\\Desktop\\newhcb\\Navigation View3D\\Extractor_projects-master\\extractor-csharp\\tests\\MaNGOS.Extractor.Tests.csproj",
   "expectedPackageFiles": [
@@ -84,7 +84,6 @@
     "C:\\Users\\Texy6\\.nuget\\packages\\system.security.cryptography.x509certificates\\4.3.0\\system.security.cryptography.x509certificates.4.3.0.nupkg.sha512",
     "C:\\Users\\Texy6\\.nuget\\packages\\system.text.encoding\\4.3.0\\system.text.encoding.4.3.0.nupkg.sha512",
     "C:\\Users\\Texy6\\.nuget\\packages\\system.text.encoding.extensions\\4.3.0\\system.text.encoding.extensions.4.3.0.nupkg.sha512",
-    "C:\\Users\\Texy6\\.nuget\\packages\\system.text.json\\8.0.5\\system.text.json.8.0.5.nupkg.sha512",
     "C:\\Users\\Texy6\\.nuget\\packages\\system.text.regularexpressions\\4.3.0\\system.text.regularexpressions.4.3.0.nupkg.sha512",
     "C:\\Users\\Texy6\\.nuget\\packages\\system.threading\\4.3.0\\system.threading.4.3.0.nupkg.sha512",
     "C:\\Users\\Texy6\\.nuget\\packages\\system.threading.tasks\\4.3.0\\system.threading.tasks.4.3.0.nupkg.sha512",

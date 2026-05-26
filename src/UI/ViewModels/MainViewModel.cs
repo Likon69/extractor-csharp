@@ -180,7 +180,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public ObservableCollection<LogMessage> LogMessages { get; } = new();
 
-    public MainViewModel() : this(ObservableLoggerProvider.Instance)
+    public MainViewModel() : this(new ObservableLoggerProvider())
     {
     }
 

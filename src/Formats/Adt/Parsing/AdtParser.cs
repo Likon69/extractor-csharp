@@ -199,21 +199,6 @@ public sealed class AdtParser
         return new AdtParseResult(tile, warnings);
     }
 
-    private LiquidData ExtractLiquidForCell(in AdtMh2o waterData, int cellIndex)
-    {
-        if (waterData.Cells == null || cellIndex < 0 || cellIndex >= 256)
-            return LiquidData.Empty;
-
-        var cell = waterData.Cells[cellIndex];
-        if (!cell.HasData)
-            return LiquidData.Empty;
-
-        // Note: For full implementation, would need to seek to cell.HeaderOffset
-        // and parse AdtMh2oHeader + depth map + vertex colors.
-        // For now, return empty as we don't have the reader context here.
-        return LiquidData.Empty;
-    }
-
     private LiquidData ParseMh2oCellData(SpanReader reader, uint offset, in AdtMh2oCell cell)
     {
         if (!cell.HasData || offset == 0)

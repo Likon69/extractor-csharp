@@ -1,9 +1,13 @@
 # Build outputs
-bin/
-obj/
 *.dll
 *.exe
 *.pdb
+src/bin/
+src/obj/
+tests/bin/
+tests/obj/
+native/RecastBuilderDll/bin/
+native/RecastBuilderDll/obj/
 
 # IDE
 .vs/
@@ -14,12 +18,8 @@ obj/
 # Logs
 *.log
 
-# Config with secrets
+# Config
 ExtractorConfig.json
 
-# Native build artifacts
-native/RecastBuilderDll/obj/
-native/RecastBuilderDll/bin/
-
-# Test outputs
-TestResults/
+# Test
+TestResults/gameobject_spawns.bin

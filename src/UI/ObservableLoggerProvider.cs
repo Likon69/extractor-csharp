@@ -5,8 +5,6 @@ namespace MaNGOS.Extractor.UI;
 
 public sealed class ObservableLoggerProvider : ILoggerFactory, ILoggerProvider
 {
-    public static readonly ObservableLoggerProvider Instance = new();
-
     private readonly List<ILogger> _loggers = new();
     public ObservableCollection<LogEntry> Entries { get; } = new();
 
