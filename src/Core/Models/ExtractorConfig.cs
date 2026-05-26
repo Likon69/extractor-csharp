@@ -29,7 +29,7 @@ public sealed class ExtractorConfig
     public bool BigBaseUnit { get; init; }
 
     [JsonPropertyName("RecastConfig")]
-    public RecastConfig RecastConfig { get; init; }
+    public RecastConfig? RecastConfig { get; init; }
 }
 
 public readonly struct RecastConfig

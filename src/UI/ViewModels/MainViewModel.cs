@@ -2,17 +2,17 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
-using System.Text.Json;
-using System.Threading.Tasks;
-using System.Windows;
 using System.Windows.Input;
 using Microsoft.Extensions.Logging;
+using Microsoft.Win32;
 using MaNGOS.Extractor.Core.Constants;
 using MaNGOS.Extractor.Core.Models;
+using MaNGOS.Extractor.Formats.Dbc;
 using MaNGOS.Extractor.Formats.Mpq;
 using MaNGOS.Extractor.MapExtractor;
 using MaNGOS.Extractor.MmapExtractor;
 using MaNGOS.Extractor.RoadExtractor;
+using MaNGOS.Extractor.UI.Config;
 using MaNGOS.Extractor.VmapExtractor;
 using Mel = Microsoft.Extensions.Logging;
 
@@ -27,7 +27,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private MpqArchiveCollection? _archives;
 
     public event PropertyChangedEventHandler? PropertyChanged;
-
     public TileGridViewModel TileGrid => _tileGrid;
 
     public ICommand StartCommand { get; }
@@ -38,87 +37,27 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string[] PhaseNames => new[] { "Toutes", "Map", "Vmap", "Road", "Mmap" };
     public string[] Locales => new[] { "enUS", "enGB", "deDE", "frFR", "esES", "ruRU" };
 
-    private string _selectedPhase = "Toutes";
-    public string SelectedPhase
-    {
-        get => _selectedPhase;
-        set { _selectedPhase = value; OnPropertyChanged(); UpdatePhaseEnabled(); }
-    }
-
-    private string _selectedLocale = "enUS";
-    public string SelectedLocale
-    {
-        get => _selectedLocale;
-        set { _selectedLocale = value; OnPropertyChanged(); }
-    }
+    public string SelectedPhase { get; set; } = "Toutes";
+    public string SelectedLocale { get; set; } = "enUS";
 
     private string _wowClientPath = @"C:\World of Warcraft";
-    public string WowClientPath
-    {
-        get => _wowClientPath;
-        set { _wowClientPath = value; OnPropertyChanged(); }
-    }
+    public string WowClientPath { get => _wowClientPath; set { _wowClientPath = value; OnPropertyChanged(); } }
 
     private string _outputPath = @"D:\wow-data\output";
-    public string OutputPath
-    {
-        get => _outputPath;
-        set { _outputPath = value; OnPropertyChanged(); }
-    }
+    public string OutputPath { get => _outputPath; set { _outputPath = value; OnPropertyChanged(); } }
 
     private string _goSpawnsPath = "gameobject_spawns.bin";
-    public string GoSpawnsPath
-    {
-        get => _goSpawnsPath;
-        set { _goSpawnsPath = value; OnPropertyChanged(); }
-    }
+    public string GoSpawnsPath { get => _goSpawnsPath; set { _goSpawnsPath = value; OnPropertyChanged(); } }
 
-    private int _threadCount = 4;
-    public int ThreadCount
-    {
-        get => _threadCount;
-        set { _threadCount = Math.Max(1, Math.Min(32, value)); OnPropertyChanged(); }
-    }
-
-    private bool _bigBaseUnit;
-    public bool BigBaseUnit
-    {
-        get => _bigBaseUnit;
-        set { _bigBaseUnit = value; OnPropertyChanged(); }
-    }
+    public int ThreadCount { get; set; } = 4;
 
     private bool _isExtracting;
-    public bool IsExtracting
-    {
-        get => _isExtracting;
-        private set { _isExtracting = value; OnPropertyChanged(); OnPropertyChanged(nameof(CanStart)); OnPropertyChanged(nameof(CanStop)); }
-    }
-
+    public bool IsExtracting { get => _isExtracting; private set { _isExtracting = value; OnPropertyChanged(); OnPropertyChanged(nameof(CanStart)); OnPropertyChanged(nameof(CanStop)); } }
     public bool CanStart => !IsExtracting;
     public bool CanStop => IsExtracting;
 
-    private int _totalTiles;
-    public int TotalTiles
-    {
-        get => _totalTiles;
-        private set { _totalTiles = value; OnPropertyChanged(); }
-    }
-
-    private int _processedTiles;
-    public int ProcessedTiles
-    {
-        get => _processedTiles;
-        private set { _processedTiles = value; OnPropertyChanged(); OnPropertyChanged(nameof(Progress)); }
-    }
-
-    public double Progress => TotalTiles > 0 ? (double)ProcessedTiles / TotalTiles * 100 : 0;
-
-    private string _statusMessage = "Ready";
-    public string StatusMessage
-    {
-        get => _statusMessage;
-        private set { _statusMessage = value; OnPropertyChanged(); }
-    }
+    public int ProcessedTiles { get; private set; }
+    public string StatusMessage { get; private set; } = "Ready";
 
     public ObservableCollection<PhaseItem> Phases { get; } = new()
     {
@@ -128,79 +67,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
         new PhaseItem { Name = "Mmap", IsEnabled = true }
     };
 
-    public ObservableCollection<MapSelectionItem> SelectedMaps { get; } = new()
-    {
-        new MapSelectionItem { MapId = 0, Name = "Azeroth", IsSelected = true },
-        new MapSelectionItem { MapId = 1, Name = "Kalimdor", IsSelected = false },
-        new MapSelectionItem { MapId = 530, Name = "Outland", IsSelected = false },
-        new MapSelectionItem { MapId = 571, Name = "Northrend", IsSelected = true }
-    };
+    public ObservableCollection<MapSelectionItem> SelectedMaps { get; } = new();
 
-    private float _cellSize = 0.303030f;
-    public float CellSize
-    {
-        get => _cellSize;
-        set { _cellSize = value; OnPropertyChanged(); }
-    }
-
-    private float _cellHeight = 0.2f;
-    public float CellHeight
-    {
-        get => _cellHeight;
-        set { _cellHeight = value; OnPropertyChanged(); }
-    }
-
-    private float _walkableSlopeAngle = 50.0f;
-    public float WalkableSlopeAngle
-    {
-        get => _walkableSlopeAngle;
-        set { _walkableSlopeAngle = value; OnPropertyChanged(); }
-    }
-
-    private int _walkableHeight = 11;
-    public int WalkableHeight
-    {
-        get => _walkableHeight;
-        set { _walkableHeight = value; OnPropertyChanged(); }
-    }
-
-    private int _walkableRadius = 2;
-    public int WalkableRadius
-    {
-        get => _walkableRadius;
-        set { _walkableRadius = value; OnPropertyChanged(); }
-    }
-
-    private int _walkableClimb = 5;
-    public int WalkableClimb
-    {
-        get => _walkableClimb;
-        set { _walkableClimb = value; OnPropertyChanged(); }
-    }
+    public float CellSize { get; set; } = 0.303030f;
+    public float CellHeight { get; set; } = 0.2f;
+    public float WalkableSlopeAngle { get; set; } = 50.0f;
+    public int WalkableHeight { get; set; } = 11;
+    public int WalkableRadius { get; set; } = 2;
+    public int WalkableClimb { get; set; } = 5;
 
     public ObservableCollection<LogMessage> LogMessages { get; } = new();
-
-    public MainViewModel() : this(new ObservableLoggerProvider())
-    {
-    }
 
     public MainViewModel(ILoggerFactory loggerFactory)
     {
         _loggerFactory = loggerFactory;
         _tileGrid = new TileGridViewModel();
         _configPath = Path.Combine(AppContext.BaseDirectory, "ExtractorConfig.json");
-
-        if (_loggerFactory is ObservableLoggerProvider obs)
-        {
-            obs.Entries.CollectionChanged += (_, e) =>
-            {
-                if (e.NewItems != null)
-                    foreach (LogEntry entry in e.NewItems)
-                        LogMessages.Add(new LogMessage(entry.Message, entry.Level));
-            };
-            foreach (var entry in obs.Entries)
-                LogMessages.Add(new LogMessage(entry.Message, entry.Level));
-        }
 
         StartCommand = new RelayCommand(async _ => await StartExtractionAsync(), _ => CanStart);
         StopCommand = new RelayCommand(_ => StopExtraction(), _ => CanStop);
@@ -210,109 +92,104 @@ public sealed class MainViewModel : INotifyPropertyChanged
         LoadConfig();
     }
 
+    public MainViewModel() : this(LoggerFactory.Create(b => { })) { }
+
     private void BrowsePath(bool isWowPath)
     {
-        var dialog = new Microsoft.Win32.OpenFolderDialog
+        var dialog = new OpenFolderDialog
         {
             Title = isWowPath ? "Select WoW Client Directory" : "Select Output Directory",
             InitialDirectory = isWowPath ? WowClientPath : OutputPath
         };
-
         if (dialog.ShowDialog() == true)
         {
-            if (isWowPath)
-                WowClientPath = dialog.FolderName;
-            else
-                OutputPath = dialog.FolderName;
+            if (isWowPath) WowClientPath = dialog.FolderName;
+            else OutputPath = dialog.FolderName;
         }
-    }
-
-    private void UpdatePhaseEnabled()
-    {
-        bool allEnabled = SelectedPhase == "Toutes";
-        foreach (var phase in Phases)
-            phase.IsEnabled = allEnabled || phase.Name == SelectedPhase;
     }
 
     public void LoadConfig()
     {
-        if (!File.Exists(_configPath))
+        var config = ConfigFileManager.Load(_configPath);
+
+        if (config == null)
+        {
+            WowClientPath = @"C:\World of Warcraft";
+            OutputPath = @"D:\wow-data\output";
+            GoSpawnsPath = "gameobject_spawns.bin";
+            ThreadCount = 4;
+            SelectedMaps.Clear();
+            SelectedMaps.Add(new MapSelectionItem { MapId = 0, Name = "Azeroth", IsSelected = true });
+            SelectedMaps.Add(new MapSelectionItem { MapId = 571, Name = "Northrend", IsSelected = true });
             return;
-
-        try
-        {
-            var json = File.ReadAllText(_configPath);
-            var config = JsonSerializer.Deserialize<ExtractorConfig>(json);
-            if (config == null) return;
-
-            WowClientPath = config.WowClientPath ?? string.Empty;
-            OutputPath = config.OutputPath ?? string.Empty;
-            GoSpawnsPath = config.GoSpawnsPath ?? string.Empty;
-            ThreadCount = config.Threads;
-            BigBaseUnit = config.BigBaseUnit;
-
-            if (config.RecastConfig.CellSize > 0)
-            {
-                CellSize = config.RecastConfig.CellSize;
-                CellHeight = config.RecastConfig.CellHeight;
-                WalkableSlopeAngle = config.RecastConfig.WalkableSlopeAngle;
-                WalkableHeight = config.RecastConfig.WalkableHeight;
-                WalkableRadius = config.RecastConfig.WalkableRadius;
-                WalkableClimb = config.RecastConfig.WalkableClimb;
-            }
-
-            if (!string.IsNullOrEmpty(config.Locale))
-                SelectedLocale = config.Locale;
-
-            AddLog("Configuration loaded.");
         }
-        catch (Exception ex)
+
+        WowClientPath = config?.WowClientPath ?? string.Empty;
+        OutputPath = config?.OutputPath ?? string.Empty;
+        GoSpawnsPath = config?.GoSpawnsPath ?? string.Empty;
+        ThreadCount = config.Threads > 0 ? config.Threads : 4;
+
+        if (config?.RecastConfig is { } r)
         {
-            AddLog($"Failed to load config: {ex.Message}");
+            CellSize = r.CellSize;
+            CellHeight = r.CellHeight;
+            WalkableSlopeAngle = r.WalkableSlopeAngle;
+            WalkableHeight = r.WalkableHeight;
+            WalkableRadius = r.WalkableRadius;
+            WalkableClimb = r.WalkableClimb;
         }
+
+        SelectedLocale = config?.Locale ?? "enUS";
+        LoadMapSelection(config);
     }
 
-    public void SaveConfig()
+    private void LoadMapSelection(ExtractorConfig? config)
     {
-        var config = new ExtractorConfig
+        var selectedIds = config?.SelectedMapIds != null
+            ? new HashSet<int>(config.SelectedMapIds)
+            : new HashSet<int> { 0, 571 };
+
+        if (_archives != null && _archives.TryReadFile(@"DBFilesClient\Map.dbc", out var mapDbcData))
         {
-            WowClientPath = WowClientPath,
-            OutputPath = OutputPath,
-            GoSpawnsPath = GoSpawnsPath,
-            EnabledPhases = Phases.Where(p => p.IsEnabled).Select(p => p.Name).ToArray(),
-            SelectedMapIds = SelectedMaps.Where(m => m.IsSelected).Select(m => m.MapId).ToArray(),
-            Threads = ThreadCount,
-            BigBaseUnit = BigBaseUnit,
-            Locale = SelectedLocale,
-            RecastConfig = new RecastConfig(CellSize, CellHeight, WalkableSlopeAngle,
-                WalkableHeight, WalkableRadius, WalkableClimb)
-        };
+            try
+            {
+                var reader = DbcReader<MapDbcRow>.Parse(mapDbcData.Span);
+                foreach (var row in reader.Rows)
+                {
+                    string dir = reader.GetString(row, 1);
+                    if (!string.IsNullOrEmpty(dir))
+                        SelectedMaps.Add(new MapSelectionItem
+                        {
+                            MapId = (int)row.Id,
+                            Name = dir,
+                            IsSelected = selectedIds.Contains((int)row.Id)
+                        });
+                }
+            }
+            catch { }
+        }
 
-        var json = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(_configPath, json);
-
-        AddLog("Configuration saved.");
+        if (SelectedMaps.Count == 0)
+        {
+            SelectedMaps.Add(new MapSelectionItem { MapId = 0, Name = "Azeroth", IsSelected = selectedIds.Contains(0) });
+            SelectedMaps.Add(new MapSelectionItem { MapId = 1, Name = "Kalimdor", IsSelected = selectedIds.Contains(1) });
+            SelectedMaps.Add(new MapSelectionItem { MapId = 530, Name = "Outland", IsSelected = selectedIds.Contains(530) });
+            SelectedMaps.Add(new MapSelectionItem { MapId = 571, Name = "Northrend", IsSelected = selectedIds.Contains(571) });
+        }
     }
 
     public async Task StartExtractionAsync()
     {
-        if (IsExtracting)
-            return;
-
+        if (IsExtracting) return;
         IsExtracting = true;
         _cts = new CancellationTokenSource();
 
         try
         {
             var maps = SelectedMaps.Where(m => m.IsSelected).ToList();
-            if (maps.Count == 0)
-            {
-                AddLog("No maps selected.");
-                return;
-            }
+            if (maps.Count == 0) { AddLog("No maps selected."); return; }
 
             var enabledPhases = Phases.Where(p => p.IsEnabled).Select(p => p.Name).ToList();
-
             string mapDir = Path.Combine(OutputPath, "maps");
             string vmapDir = Path.Combine(OutputPath, "vmaps");
             string roadDir = Path.Combine(OutputPath, "road");
@@ -325,8 +202,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
             _archives = MpqArchiveCollection.FromWoWDirectory(WowClientPath, SelectedLocale, _loggerFactory);
 
-            var progress = new Progress<TileProgressEvent>(e => _tileGrid.OnTileProgress(e));
+            if (SelectedMaps.Count <= 4)
+                LoadMapSelection(new ExtractorConfig { SelectedMapIds = maps.Select(m => m.MapId).ToArray() });
 
+            var progress = new Progress<TileProgressEvent>(e => _tileGrid.OnTileProgress(e));
             AddLog($"Starting extraction: {maps.Count} maps, {enabledPhases.Count} phases, {ThreadCount} threads");
 
             int processed = 0;
@@ -334,45 +213,36 @@ public sealed class MainViewModel : INotifyPropertyChanged
             foreach (var map in maps)
             {
                 _cts.Token.ThrowIfCancellationRequested();
-
                 string mapName = WowConstants.GetMapDirectory((uint)map.MapId);
 
                 if (enabledPhases.Contains("Map"))
                 {
                     AddLog($"[Map] Extracting {mapName}...");
-                    var service = new MapExtractorService(_archives, _loggerFactory, mapDir);
-                    int tiles = await service.ExtractMapAsync((uint)map.MapId, mapName, progress, _cts.Token);
+                    int tiles = await new MapExtractorService(_archives, _loggerFactory, mapDir)
+                        .ExtractMapAsync((uint)map.MapId, mapName, progress, _cts.Token);
                     processed += tiles;
-                    AddLog($"[Map] {tiles} tiles extracted for {mapName}");
                 }
-
                 if (enabledPhases.Contains("Vmap"))
                 {
                     AddLog($"[Vmap] Extracting {mapName}...");
-                    var service = new VmapExtractorService(_archives, _loggerFactory, vmapDir);
-                    int tiles = await service.ExtractMapAsync((uint)map.MapId, mapName, progress, _cts.Token);
+                    int tiles = await new VmapExtractorService(_archives, _loggerFactory, vmapDir)
+                        .ExtractMapAsync((uint)map.MapId, mapName, progress, _cts.Token);
                     processed += tiles;
-                    AddLog($"[Vmap] {tiles} tiles extracted for {mapName}");
                 }
-
                 if (enabledPhases.Contains("Road"))
                 {
                     AddLog($"[Road] Extracting {mapName}...");
-                    var service = new RoadExtractorService(_archives, _loggerFactory, roadDir);
-                    int tiles = await service.ExtractMapAsync((uint)map.MapId, mapName, progress, _cts.Token);
+                    int tiles = await new RoadExtractorService(_archives, _loggerFactory, roadDir)
+                        .ExtractMapAsync((uint)map.MapId, mapName, progress, _cts.Token);
                     processed += tiles;
-                    AddLog($"[Road] {tiles} tiles extracted for {mapName}");
                 }
-
                 if (enabledPhases.Contains("Mmap"))
                 {
                     AddLog($"[Mmap] Extracting {mapName}...");
-                    var recastConfig = new RecastConfig(CellSize, CellHeight, WalkableSlopeAngle,
-                        WalkableHeight, WalkableRadius, WalkableClimb);
-                    var service = new MmapExtractorService(_archives, _loggerFactory, mmapDir, recastConfig, ThreadCount);
-                    int tiles = await service.ExtractMapAsync((uint)map.MapId, mapName, progress, _cts.Token);
+                    var recastConfig = new RecastConfig(CellSize, CellHeight, WalkableSlopeAngle, WalkableHeight, WalkableRadius, WalkableClimb);
+                    int tiles = await new MmapExtractorService(_archives, _loggerFactory, mmapDir, recastConfig, ThreadCount, GoSpawnsPath)
+                        .ExtractMapAsync((uint)map.MapId, mapName, progress, _cts.Token);
                     processed += tiles;
-                    AddLog($"[Mmap] {tiles} tiles extracted for {mapName}");
                 }
 
                 ProcessedTiles = processed;
@@ -396,68 +266,49 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    public void StopExtraction()
-    {
-        _cts?.Cancel();
-        StatusMessage = "Stopping...";
-    }
+    public void StopExtraction() { _cts?.Cancel(); StatusMessage = "Stopping..."; }
 
     public void AddLog(string message, Mel.LogLevel level = Mel.LogLevel.Information)
     {
-        var timestamp = DateTime.Now.ToString("HH:mm:ss");
-        LogMessages.Add(new LogMessage($"[{timestamp}] {message}", level));
-
-        while (LogMessages.Count > 1000)
-            LogMessages.RemoveAt(0);
+        var ts = DateTime.Now.ToString("HH:mm:ss");
+        LogMessages.Add(new LogMessage($"[{ts}] {message}", level));
+        while (LogMessages.Count > 1000) LogMessages.RemoveAt(0);
     }
 
     private void OnPropertyChanged([CallerMemberName] string? name = null)
-    {
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
-    }
+        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 }
 
 public sealed class PhaseItem : INotifyPropertyChanged
 {
-    private bool _isEnabled;
-    public bool IsEnabled
-    {
-        get => _isEnabled;
-        set { _isEnabled = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsEnabled))); }
-    }
-
-    public string Name { get; init; } = string.Empty;
-
+    private bool _isEnabled = true;
+    public bool IsEnabled { get => _isEnabled; set { _isEnabled = value; OnPropertyChanged(); } }
+    public string Name { get; init; } = "";
     public event PropertyChangedEventHandler? PropertyChanged;
+    private void OnPropertyChanged([CallerMemberName] string? n = null)
+        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(n));
 }
 
 public sealed class MapSelectionItem : INotifyPropertyChanged
 {
     public int MapId { get; init; }
-    public string Name { get; init; } = string.Empty;
-
+    public string Name { get; init; } = "";
     private bool _isSelected;
-    public bool IsSelected
-    {
-        get => _isSelected;
-        set { _isSelected = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelected))); }
-    }
-
+    public bool IsSelected { get => _isSelected; set { _isSelected = value; OnPropertyChanged(); } }
     public event PropertyChangedEventHandler? PropertyChanged;
+    private void OnPropertyChanged([CallerMemberName] string? n = null)
+        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(n));
 }
 
 public sealed class LogMessage
 {
     public string Text { get; }
     public Mel.LogLevel Level { get; }
-
     public System.Windows.Media.Brush Color => Level switch
     {
         Mel.LogLevel.Warning => System.Windows.Media.Brushes.Orange,
         Mel.LogLevel.Error => System.Windows.Media.Brushes.Red,
-        Mel.LogLevel.Critical => System.Windows.Media.Brushes.DarkRed,
         _ => System.Windows.Media.Brushes.White
     };
-
     public LogMessage(string text, Mel.LogLevel level) => (Text, Level) = (text, level);
 }

@@ -7,10 +7,15 @@ using MaNGOS.Extractor.Core.Constants;
 
 namespace MaNGOS.Extractor.Formats.Dbc;
 
+/// <summary>
+/// Reads DBC database files. Provides indexer access to rows and GetString(fieldIndex).
+/// Generic over row type — use a struct with the right Size= to match the file's rowSize.
+/// </summary>
 public sealed class DbcReader<TRow> where TRow : unmanaged
 {
     private TRow[] _rows = Array.Empty<TRow>();
     private string[] _columnNames = Array.Empty<string>();
+    private byte[] _stringBlock = Array.Empty<byte>();
 
     public int RowCount => _rows.Length;
     public int ColumnCount => _columnNames.Length;
@@ -34,39 +39,51 @@ public sealed class DbcReader<TRow> where TRow : unmanaged
         if (rowSize != expectedRowSize)
             throw new InvalidDataException($"Row size mismatch: expected {expectedRowSize}, got {rowSize}");
 
-        int dataSize = (int)(recordCount * rowSize);
         var rows = new TRow[recordCount];
         for (uint i = 0; i < recordCount; i++)
-        {
             rows[i] = reader.Read<TRow>();
-        }
 
-        var stringBlock = reader.ReadSpan((int)stringBlockSize);
+        var stringBlock = reader.ReadBytes((int)stringBlockSize);
 
-        var reader2 = new DbcReader<TRow>
+        var instance = new DbcReader<TRow>
         {
             _rows = rows,
-            _columnNames = new string[fieldCount]
+            _columnNames = new string[fieldCount],
+            _stringBlock = stringBlock
         };
 
         int pos = 0;
         for (uint col = 0; col < fieldCount; col++)
         {
             string name = ReadString(stringBlock, pos);
-            reader2._columnNames[col] = name;
+            instance._columnNames[col] = name;
             pos += name.Length + 1;
         }
 
-        return reader2;
+        return instance;
+    }
+
+    /// <summary>Reads string from the string block at offset stored in row[fieldIndex].</summary>
+    public string GetString(TRow row, int fieldIndex)
+    {
+        unsafe
+        {
+            TRow* rowPtr = &row;
+            int fieldOffset = fieldIndex * Unsafe.SizeOf<TRow>();
+            uint stringOffset = MemoryMarshal.Read<uint>(
+                new ReadOnlySpan<byte>((byte*)rowPtr + fieldOffset, Unsafe.SizeOf<TRow>()));
+
+            if (stringOffset >= _stringBlock.Length)
+                return string.Empty;
+
+            return ReadString(_stringBlock, (int)stringOffset);
+        }
     }
 
     public TRow? FindById(uint id)
     {
         foreach (var row in _rows)
-        {
-            if (GetId(row) == id)
-                return row;
-        }
+            if (GetId(row) == id) return row;
         return null;
     }
 
@@ -75,20 +92,15 @@ public sealed class DbcReader<TRow> where TRow : unmanaged
         unsafe
         {
             TRow* ptr = &row;
-            var bytes = new ReadOnlySpan<byte>(ptr, Unsafe.SizeOf<TRow>());
-            return MemoryMarshal.Read<uint>(bytes);
+            return MemoryMarshal.Read<uint>(new ReadOnlySpan<byte>(ptr, Unsafe.SizeOf<TRow>()));
         }
     }
 
-    private static string ReadString(ReadOnlySpan<byte> block, int offset)
+    private static string ReadString(Span<byte> block, int offset)
     {
-        if (offset >= block.Length)
-            return string.Empty;
-
+        if (offset < 0 || offset >= block.Length) return string.Empty;
         int end = offset;
-        while (end < block.Length && block[end] != 0)
-            end++;
-
+        while (end < block.Length && block[end] != 0) end++;
         return Encoding.UTF8.GetString(block.Slice(offset, end - offset));
     }
 }
