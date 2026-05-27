@@ -1,0 +1,20 @@
+fix: correct mmap tile geometry, naming and header format
+
+- Fix sub-tile bounding box origin (main cause of identical ~15KB tiles)
+  adtMinX + subX * SubTileSize instead of tileOriginX - subX * SubTileSize
+  Triangles were outside the bbox, producing near-empty nav meshes
+
+- Fix mmtile filename format to D2 for tile coords (7 chars total)
+  Matches MaNGOS loadMap() convention: 000YYXX.mmtile
+
+- Fix usesLiquids written as uint32 instead of byte
+  Prevents header misalignment when C++ reads the struct
+
+- Fix 000.mmap header: use TileSize for gridSize, actual ADT count
+  for tileCount, and 1<<20 for maxPolyRef (DT_POLYREF64)
+
+- Fix StormLib P/Invoke charset (Ansi) for MPQ internal file lookups
+- Fix DBC row size: accept actual size, skip trailing bytes
+- Fix RecastBuildParams struct layout to match native C++ exactly
+- Add FileLog crash logger and global exception hooks
+- Harden ADT chunk scanner against corrupt/oversized chunk sizes
