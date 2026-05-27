@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Input;
@@ -10,6 +11,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Win32;
 using MaNGOS.Extractor.Core.Constants;
 using MaNGOS.Extractor.Core.Models;
+using MaNGOS.Extractor.Formats.Adt.Models;
 using MaNGOS.Extractor.Formats.Dbc;
 using MaNGOS.Extractor.Formats.Mpq;
 using MaNGOS.Extractor.MapExtractor;
@@ -193,25 +195,48 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private async Task TryReloadMapListAsync()
     {
         if (string.IsNullOrEmpty(_wowClientPath) || !Directory.Exists(_wowClientPath))
+        {
+            AddLog($"Chemin WoW invalide ou introuvable: {_wowClientPath}", LogLevel.Error);
             return;
+        }
 
         var path  = _wowClientPath;
         var locale = SelectedLocale;
-        var sel   = SelectedMaps.Where(m => m.IsSelected).Select(m => m.MapId).ToHashSet();
+        var dataDir = Path.Combine(path, "Data");
+        var localeDir = Path.Combine(dataDir, locale);
+        AddLog($"Chargement des cartes depuis {path}... (locale={locale})");
 
-        AddLog($"Chargement des cartes depuis {path}...");
+        if (!Directory.Exists(dataDir))
+        {
+            AddLog($"Dossier Data introuvable: {dataDir}", LogLevel.Error);
+            return;
+        }
+
+        if (!Directory.Exists(localeDir))
+        {
+            AddLog($"Dossier locale introuvable: {localeDir}. Locale={locale}", LogLevel.Warning);
+        }
+
+        var sel = SelectedMaps.Where(m => m.IsSelected).Select(m => m.MapId).ToHashSet();
 
         List<MapSelectionItem> loaded;
+        List<string> diag = new();
         try
         {
             loaded = await Task.Run(() =>
             {
                 using var archives = MpqArchiveCollection.FromWoWDirectory(path, locale, _loggerFactory);
+                diag.Add($"{archives.ArchiveCount} archives MPQ ouvertes.");
 
-                if (!archives.TryReadFile(@"DBFilesClient\Map.dbc", out var data))
+                if (!archives.TryReadFile("DBFilesClient\\Map.dbc", out var data))
+                {
+                    diag.Add($"Map.dbc introuvable dans les archives MPQ.");
                     return new List<MapSelectionItem>();
+                }
 
                 var reader = DbcReader<MapDbcRow>.Parse(data.Span);
+                diag.Add($"Map.dbc: {reader.RowCount} entrées.");
+
                 var result = new List<MapSelectionItem>();
                 foreach (var row in reader.Rows)
                 {
@@ -230,9 +255,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
         catch (Exception ex)
         {
-            AddLog($"Erreur MPQ [{ex.GetType().Name}]: {ex.Message}", LogLevel.Error);
+            AddLog($"Erreur [{ex.GetType().Name}]: {ex.Message}", LogLevel.Error);
+            if (ex.InnerException != null)
+                AddLog($"  Cause: {ex.InnerException.Message}", LogLevel.Error);
             return;
         }
+
+        foreach (var d in diag)
+            AddLog(d);
 
         SelectedMaps.Clear();
         foreach (var item in loaded)
@@ -301,6 +331,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
             _archives = await Task.Run(() =>
                 MpqArchiveCollection.FromWoWDirectory(WowClientPath, SelectedLocale, _loggerFactory));
+
+            // Load area flags for correct Recast area types
+            AdtFile.LoadAreaTable(_archives);
+            AdtFile.LoadLiquidTypeTable(_archives);
 
             var progress = new Progress<TileProgressEvent>(e => _tileGrid.OnTileProgress(e));
             AddLog($"Starting extraction: {maps.Count} maps, {enabledPhases.Count} phases, {ThreadCount} threads");

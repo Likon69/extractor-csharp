@@ -21,22 +21,22 @@ internal static class RecastNative
 [StructLayout(LayoutKind.Sequential)]
 public struct RecastBuildParams
 {
-    public float BoundingBoxMinX;
-    public float BoundingBoxMinY;
-    public float BoundingBoxMinZ;
-    public float BoundingBoxMaxX;
-    public float BoundingBoxMaxY;
-    public float BoundingBoxMaxZ;
     public float CellSize;
     public float CellHeight;
     public float WalkableSlopeAngle;
     public int WalkableHeight;
     public int WalkableRadius;
     public int WalkableClimb;
-    public int TileX;
-    public int TileY;
     public int MinRegionArea;    // cell count, e.g. rcSqr(20) = 400
     public int MergeRegionArea;  // cell count, e.g. rcSqr(40) = 1600
     public float MaxSimplificationError;
-    public int MaxVertsPerPoly;
+    public int TileX;
+    public int TileY;
+    public float BoundingBoxMinX;
+    public float BoundingBoxMinY;
+    public float BoundingBoxMinZ;
+    public float BoundingBoxMaxX;
+    public float BoundingBoxMaxY;
+    public float BoundingBoxMaxZ;
+    public int MaxVertsPerPoly;  // MUST be last field
 }

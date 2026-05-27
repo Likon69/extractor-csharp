@@ -1,4 +1,5 @@
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Logging;
 using MaNGOS.Extractor.Core.Constants;
@@ -30,59 +31,176 @@ public sealed class MapFileWriter
 
     private void WriteTileSync(MapTile tile, string filePath)
     {
+        // ── Step 1: Build liquid grid from per-chunk data ─────────────────
+        var liquidEntry  = new ushort[16, 16]; // raw LiquidType.dbc ID per MCNK
+        var liquidFlags  = new byte[16, 16];   // MAP_LIQUID_TYPE flags per MCNK
+        var liquidShow   = new bool[128, 128]; // per sub-cell visibility
+        const float NoLiq = -500f;
+        var liquidHeight = new float[129, 129];
+        for (int y2 = 0; y2 < 129; y2++)
+            for (int x2 = 0; x2 < 129; x2++)
+                liquidHeight[y2, x2] = NoLiq;
+
+        if (tile.ChunkLiquids != null)
+        {
+            for (int ci = 0; ci < Math.Min(256, tile.ChunkLiquids.Length); ci++)
+            {
+                ref readonly var liq = ref tile.ChunkLiquids[ci];
+                if (!liq.HasLiquid) continue;
+                int cr = ci / 16, cc = ci % 16;
+                liquidEntry[cr, cc] = liq.RawTypeId;
+                liquidFlags[cr, cc] = liq.TypeFlags;
+
+                for (int ly = 0; ly < liq.Height; ly++)
+                    for (int lx = 0; lx < liq.Width; lx++)
+                    {
+                        int bit = ly * liq.Width + lx;
+                        if (liq.ShowMask != 0UL && ((liq.ShowMask >> bit) & 1UL) == 0UL) continue;
+                        int gy = cr * 8 + liq.OffsetY + ly, gx = cc * 8 + liq.OffsetX + lx;
+                        if ((uint)gy < 128 && (uint)gx < 128) liquidShow[gy, gx] = true;
+                    }
+
+                for (int ly = 0; ly <= liq.Height; ly++)
+                    for (int lx = 0; lx <= liq.Width; lx++)
+                    {
+                        int gy = cr * 8 + liq.OffsetY + ly, gx = cc * 8 + liq.OffsetX + lx;
+                        if ((uint)gy < 129 && (uint)gx < 129)
+                        {
+                            int idx = ly * (liq.Width + 1) + lx;
+                            liquidHeight[gy, gx] = liq.Heights != null && idx < liq.Heights.Length
+                                ? liq.Heights[idx] : liq.MinHeight;
+                        }
+                    }
+            }
+        }
+
+        // ── Step 2: Analyse liquid data ───────────────────────────────────
+        bool anyLiquid = false;
+        for (int y2 = 0; y2 < 16 && !anyLiquid; y2++)
+            for (int x2 = 0; x2 < 16; x2++)
+                if (liquidFlags[y2, x2] != 0) { anyLiquid = true; break; }
+
+        int liqMinX = 127, liqMinY = 127, liqMaxX = 0, liqMaxY = 0;
+        byte liqBaseType = 0;
+        bool liqFullType = false;
+        float liqMinH = 0f, liqMaxH = 0f;
+        ushort liqHdrFlags = 0;
+        byte liqW = 1, liqH = 1;
+
+        if (anyLiquid)
+        {
+            for (int y2 = 0; y2 < 128; y2++)
+                for (int x2 = 0; x2 < 128; x2++)
+                    if (liquidShow[y2, x2])
+                    {
+                        if (x2 < liqMinX) liqMinX = x2; if (x2 > liqMaxX) liqMaxX = x2;
+                        if (y2 < liqMinY) liqMinY = y2; if (y2 > liqMaxY) liqMaxY = y2;
+                    }
+            if (liqMinX > liqMaxX) { liqMinX = liqMinY = 0; liqMaxX = liqMaxY = 0; }
+
+            bool baseFound = false;
+            for (int y2 = 0; y2 < 16 && !baseFound; y2++)
+                for (int x2 = 0; x2 < 16; x2++)
+                    if (liquidFlags[y2, x2] != 0) { liqBaseType = liquidFlags[y2, x2]; baseFound = true; break; }
+
+            for (int y2 = 0; y2 < 16 && !liqFullType; y2++)
+                for (int x2 = 0; x2 < 16; x2++)
+                    if (liquidFlags[y2, x2] != 0 && liquidFlags[y2, x2] != liqBaseType)
+                    { liqFullType = true; break; }
+
+            liqW = (byte)(liqMaxX - liqMinX + 2);
+            liqH = (byte)(liqMaxY - liqMinY + 2);
+
+            liqMinH = float.MaxValue; liqMaxH = float.MinValue;
+            for (int y2 = liqMinY; y2 <= liqMaxY + 1 && y2 < 129; y2++)
+                for (int x2 = liqMinX; x2 <= liqMaxX + 1 && x2 < 129; x2++)
+                {
+                    float hv = liquidHeight[y2, x2];
+                    if (hv > NoLiq) { if (hv < liqMinH) liqMinH = hv; if (hv > liqMaxH) liqMaxH = hv; }
+                }
+            if (liqMinH > liqMaxH) liqMinH = liqMaxH = 0f;
+
+            if (!liqFullType) liqHdrFlags |= LiquidMapHeader.NoType;
+            if (liqMaxH - liqMinH < 0.001f) liqHdrFlags |= LiquidMapHeader.NoHeightValues;
+        }
+
+        // ── Step 3: Compute section offsets ───────────────────────────────
+        const uint areaMapOffset  = 44u;
+        const uint areaMapSize    = 8u + 256u * 2u;
+        const uint heightMapOffset = areaMapOffset + areaMapSize;
+        const uint heightMapSize   = 16u + (129u * 129u + 128u * 128u) * 4u;
+
+        uint liquidMapOffset, liquidMapSize;
+        if (!anyLiquid) { liquidMapOffset = 0u; liquidMapSize = 0u; }
+        else
+        {
+            liquidMapOffset = heightMapOffset + heightMapSize;
+            liquidMapSize   = 16u;
+            if ((liqHdrFlags & LiquidMapHeader.NoType)         == 0) liquidMapSize += 512u + 256u;
+            if ((liqHdrFlags & LiquidMapHeader.NoHeightValues) == 0) liquidMapSize += (uint)(liqW * liqH * 4);
+        }
+        uint holesOffset = anyLiquid ? liquidMapOffset + liquidMapSize : heightMapOffset + heightMapSize;
+        const uint holesSize = 256u * 2u;
+
+        // ── Step 4: Write file ────────────────────────────────────────────
         using var stream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
         using var writer = new BinaryWriter(stream);
 
-        // 11 uint32 header = 44 bytes (MaNGOS GridMap.cpp)
-        uint offsets = 44; // areaMapOffset = 44 (fixed, right after header)
-        uint heightMapOffset = offsets + 8 + 256 * 2;
-        uint liquidMapOffset = heightMapOffset + 16 + (129 * 129 + 128 * 128) * 4;
-        uint holesOffset = liquidMapOffset + 16;
-        uint areaMapSize = 8 + 256 * 2;
-        uint heightMapSize = 16 + (129 * 129 + 128 * 128) * 4;
-        uint liquidMapSize = 16;
-        uint holesSize = 256 * 2;
-
-        writer.Write(0x5350414Du);             // "MAPS" — mapMagic
-        writer.Write(MagicBytes.MapMagicWotlk); // "v1.5" — 0x76312E35
-        writer.Write(WowConstants.TargetBuild); // 12340
-        writer.Write(offsets);                  // areaMapOffset = 44
-        writer.Write(areaMapSize);              // size of area section
+        // Header (44 bytes)
+        writer.Write(0x5350414Du);              // "MAPS"
+        writer.Write(MagicBytes.MapMagicWotlk);
+        writer.Write(WowConstants.TargetBuild);
+        writer.Write(areaMapOffset);
+        writer.Write(areaMapSize);
         writer.Write(heightMapOffset);
         writer.Write(heightMapSize);
         writer.Write(liquidMapOffset);
-        writer.Write(liquidMapSize);            // 16 (header only)
+        writer.Write(liquidMapSize);
         writer.Write(holesOffset);
-        writer.Write(holesSize);                // 16 bytes holes
+        writer.Write(holesSize);
 
-        // Area section: GridMapAreaHeader(8 bytes) + uint16[16][16]
-        writer.Write(0x41455241u); // "AREA" LE — MaNGOS MAP_AREA_MAGIC
-        writer.Write((ushort)0);   // flags  (uint16)
-        writer.Write((ushort)0);   // gridArea (uint16)
+        // Area section
+        writer.Write(0x41455241u); // "AREA"
+        writer.Write((ushort)0);   // flags
+        writer.Write((ushort)0);   // gridArea
         for (int z = 0; z < 16; z++)
             for (int x = 0; x < 16; x++)
                 writer.Write(tile.AreaMap != null ? tile.AreaMap[z * 16 + x] : (ushort)0);
 
-        // Height section: GridMapHeightHeader(16 bytes) + V9[129][129] + V8[128][128]
+        // Height section
         writer.Write(MagicBytes.HeightMapMagic);
-        writer.Write(0u); // flags
+        writer.Write(0u);
         writer.Write(tile.MinHeight);
         writer.Write(tile.MaxHeight);
+        foreach (var h in BuildV9Heights(tile)) writer.Write(h);
+        foreach (var h in BuildV8Heights(tile)) writer.Write(h);
 
-        var v9 = BuildV9Heights(tile);
-        var v8 = BuildV8Heights(tile);
+        // Liquid section (only when liquid is present)
+        if (anyLiquid)
+        {
+            writer.Write(MagicBytes.LiquidMapMagic);
+            writer.Write(liqHdrFlags);
+            writer.Write(liqFullType ? (ushort)0 : (ushort)liqBaseType);
+            writer.Write((byte)liqMinX); writer.Write((byte)liqMinY);
+            writer.Write(liqW); writer.Write(liqH);
+            writer.Write(liqMinH);
 
-        foreach (var h in v9) writer.Write(h);
-        foreach (var h in v8) writer.Write(h);
+            if ((liqHdrFlags & LiquidMapHeader.NoType) == 0)
+            {
+                for (int y2 = 0; y2 < 16; y2++)
+                    for (int x2 = 0; x2 < 16; x2++) writer.Write(liquidEntry[y2, x2]);
+                for (int y2 = 0; y2 < 16; y2++)
+                    for (int x2 = 0; x2 < 16; x2++) writer.Write(liquidFlags[y2, x2]);
+            }
+            if ((liqHdrFlags & LiquidMapHeader.NoHeightValues) == 0)
+            {
+                for (int y2 = 0; y2 < liqH; y2++)
+                    for (int x2 = 0; x2 < liqW; x2++)
+                        writer.Write(liquidHeight[liqMinY + y2, liqMinX + x2]);
+            }
+        }
 
-        // Liquid section: GridMapLiquidHeader(16 bytes)
-        writer.Write(MagicBytes.LiquidMapMagic);
-        writer.Write((ushort)0); // flags
-        writer.Write((ushort)0); // liquidType
-        writer.Write((byte)0); writer.Write((byte)0); writer.Write((byte)0); writer.Write((byte)0);
-        writer.Write(0f); // liquidLevel
-
-        // Holes section: uint16[16][16]
+        // Holes section
         for (int z = 0; z < 16; z++)
             for (int x = 0; x < 16; x++)
                 writer.Write(tile.HolesMap != null ? tile.HolesMap[z * 16 + x] : (ushort)0);
@@ -151,7 +269,8 @@ public sealed class MapFileWriter
     {
         var tile = new MapTile(adt.MapId, adt.TileX, adt.TileY)
         {
-            AreaMap = adt.GetAllAreaIds().ToArray(),
+            // PORT-001: store area flags (not raw IDs) so Recast gets the correct area type
+            AreaMap = adt.GetAllAreaIds().ToArray().Select(id => AdtFile.AreaIdToAreaFlags(id)).ToArray(),
             MinHeight = float.MaxValue,
             MaxHeight = float.MinValue
         };
@@ -172,6 +291,28 @@ public sealed class MapFileWriter
         }
 
         tile.HeightMap = heights.ToArray();
+
+        // BUG-005: populate per-chunk liquid data from MH2O
+        var chunkLiquids = new MapLiquidCell[256];
+        for (int i = 0; i < 256; i++)
+        {
+            ref readonly var l = ref adt.GetLiquidData(i);
+            if (!l.HasLiquid) continue;
+            chunkLiquids[i] = new MapLiquidCell
+            {
+                RawTypeId = l.RawTypeId,
+                TypeFlags  = (byte)l.PrimaryType,
+                MinHeight  = l.LiquidLevel,
+                OffsetX    = l.OffsetX,
+                OffsetY    = l.OffsetY,
+                Width      = l.Width,
+                Height     = l.Height,
+                Heights    = l.DepthMap,
+                ShowMask   = l.ShowMask
+            };
+        }
+        tile.ChunkLiquids = chunkLiquids;
+
         return tile;
     }
 }

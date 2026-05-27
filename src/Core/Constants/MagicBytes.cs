@@ -7,7 +7,7 @@ namespace MaNGOS.Extractor.Core.Constants;
 
 public static class MagicBytes
 {
-    public const uint MapMagicWotlk = 0x76312E35;
+    public const uint MapMagicWotlk = 0x352E3176;
     public const uint MapMagicTbc = 0x73312E35;
     public const uint MapMagicClassic = 0x7A312E35;
 

@@ -33,36 +33,41 @@ public struct AdtMcin
 
 public struct AdtMcnk
 {
-    public const int HeaderSize = 144;
-    public const uint HolesHighResolutionMask = 0x20000000;
+    public const int HeaderSize = 128; // 0x80 bytes per WotLK spec
+    public const uint FlagHighResHoles = 0x10000;
 
-    public uint GridX;
-    public uint GridY;
-    public uint McvtOffset;
-    public uint McnrOffset;
-    public uint MclyOffset;
-    public uint McrfOffset;
-    public uint Unused1;
-    public uint MclvOffset;
-    public uint AreaId;
-    public uint DoodleDbId;
-    public uint Holes;
-    public ushort LowQualityGridHeight;
-    public ushort NumLayers;
-    public uint NumDoodadRefs;
-    public uint DoodadReferencesOffset;
-    public uint MtxpOffset;
-    public uint MtxpSize;
-    public uint McnrOffset2;
-    public uint McnrSize;
-    public float PositionX, PositionY, PositionZ;
-    public uint DoodadFlags;
-    public uint TextureId0;
-    public uint TextureId1;
-    public uint Unknown1;
-    public uint Unknown2;
+    public uint Flags;           // 0x00
+    public uint IndexX;          // 0x04
+    public uint IndexY;          // 0x08
+    public uint NLayers;         // 0x0C  number of texture layers
+    public uint NDoodadRefs;     // 0x10  number of doodad references
+    public uint OfsHeight;       // 0x14  offset to MCVT (from MCNK magic start)
+    public uint OfsNormal;       // 0x18  offset to MCNR
+    public uint OfsLayer;        // 0x1C  offset to MCLY
+    public uint OfsRefs;         // 0x20  offset to MCRF
+    public uint OfsAlpha;        // 0x24  offset to MCAL
+    public uint SizeAlpha;       // 0x28
+    public uint OfsShadow;       // 0x2C  offset to MCSH
+    public uint SizeShadow;      // 0x30
+    public uint AreaId;          // 0x34  zone/area ID
+    public uint NMapObjRefs;     // 0x38
+    public uint Holes;           // 0x3C  low-res holes bitmask
+    public ushort LowQualityTex0, LowQualityTex1, LowQualityTex2, LowQualityTex3; // 0x40–0x46
+    public ushort LowQualityTex4, LowQualityTex5, LowQualityTex6, LowQualityTex7; // 0x48–0x4E
+    public uint NEffectDoodad;   // 0x50
+    public uint OfsSndEmitters;  // 0x54
+    public uint NSndEmitters;    // 0x58
+    public uint OfsLiquid;       // 0x5C  offset to MCLQ
+    public uint SizeLiquid;      // 0x60
+    public float Zpos;           // 0x64  world X position
+    public float Xpos;           // 0x68  world Z position
+    public float Ypos;           // 0x6C  world Y position = height base for MCVT values
+    public uint OfsMCCV;         // 0x70
+    public uint Unused1;         // 0x74
+    public uint Unused2;         // 0x78
+    public uint Unused3;         // 0x7C  (struct total = 128 bytes = 0x80)
 
-    public bool HasHighResHoles => (DoodadFlags & HolesHighResolutionMask) != 0;
+    public bool HasHighResHoles => (Flags & FlagHighResHoles) != 0;
     public uint HolesMask => Holes & 0xFFFF;
 }
 
@@ -115,7 +120,7 @@ public struct AdtMddf
     public float RotationY;
     public float RotationX;
     public float RotationZ;
-    public float Scale;
+    public ushort Scale;
     public ushort Flags;
 }
 
@@ -126,15 +131,22 @@ public struct AdtModf
     public float PositionX;
     public float PositionY;
     public float PositionZ;
-    public float RotationY;
     public float RotationX;
+    public float RotationY;
     public float RotationZ;
+    public float LowerBoundsX;
+    public float LowerBoundsY;
+    public float LowerBoundsZ;
+    public float UpperBoundsX;
+    public float UpperBoundsY;
+    public float UpperBoundsZ;
     public float ScaleX;
     public float ScaleY;
     public float ScaleZ;
     public ushort Flags;
     public ushort DoodadSet;
-    public uint GroupIds;
+    public ushort NameSet;
+    public ushort Scale;
 }
 
 public struct AdtMfbo

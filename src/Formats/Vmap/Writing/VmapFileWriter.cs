@@ -84,26 +84,44 @@ public sealed class VmapFileWriter
 
     private void WriteGroupData(BinaryWriter writer, VmapGroupData group)
     {
-        // WMO name (null-terminated string)
-        byte[] nameBytes = Encoding.ASCII.GetBytes(group.Name);
-        writer.Write(nameBytes);
-        writer.Write((byte)0); // Null terminator
+        // Format matches C++ ConvertToVMAPGroupWmo
+        writer.Write(group.Flags);          // mogpFlags
+        writer.Write(group.GroupWmoId);     // groupWMOID
 
-        // Flags
-        writer.Write(group.Flags);
-
-        // Bounding box min
+        // Bounding box
         writer.Write(group.BoundingBoxMin.X);
         writer.Write(group.BoundingBoxMin.Y);
         writer.Write(group.BoundingBoxMin.Z);
-
-        // Bounding box max
         writer.Write(group.BoundingBoxMax.X);
         writer.Write(group.BoundingBoxMax.Y);
         writer.Write(group.BoundingBoxMax.Z);
 
-        // Liquid type
-        writer.Write(group.LiquidType);
+        writer.Write(group.LiquidFlags);    // liquflags
+
+        // GRP section: batch counts
+        int batchCount = group.BatchCount;
+        int mobaSize = batchCount * 4 + 4;
+        writer.Write(0x20505247u);          // "GRP "
+        writer.Write(mobaSize);
+        writer.Write(batchCount);
+        if (group.MobaData != null)
+            foreach (var b in group.MobaData) writer.Write(b);
+
+        // INDX section: triangle indices
+        int nIndexes = group.Indices?.Length ?? 0;
+        writer.Write(0x58444E49u);          // "INDX"
+        writer.Write(4 + nIndexes * 2);
+        writer.Write(nIndexes);
+        if (group.Indices != null)
+            foreach (var idx in group.Indices) writer.Write(idx);
+
+        // VERT section: vertex positions
+        int nVertices = (group.Vertices?.Length ?? 0) / 3;
+        writer.Write(0x54524556u);          // "VERT"
+        writer.Write(4 + nVertices * 12);
+        writer.Write(nVertices);
+        if (group.Vertices != null)
+            foreach (var v in group.Vertices) writer.Write(v);
     }
 
     private void WriteModelPlacement(BinaryWriter writer, VmapModelPlacement model)
@@ -145,7 +163,7 @@ public sealed class VmapFileWriter
                 Flags = 0, // Will be set by group parser
                 BoundingBoxMin = root.Header.BoundingBoxMin,
                 BoundingBoxMax = root.Header.BoundingBoxMax,
-                LiquidType = root.Header.WmoId
+                LiquidFlags = root.Header.WmoId
             };
         }
 
@@ -163,7 +181,7 @@ public sealed class VmapFileWriter
             Flags = GetGroupFlags(group.Header),
             BoundingBoxMin = group.Header.BoundingBoxMin,
             BoundingBoxMax = group.Header.BoundingBoxMax,
-            LiquidType = group.Header.LiquidType
+            LiquidFlags = group.Header.LiquidType
         };
     }
 

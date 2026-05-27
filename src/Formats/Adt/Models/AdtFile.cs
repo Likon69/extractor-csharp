@@ -1,4 +1,7 @@
+using System.Collections.Concurrent;
 using MaNGOS.Extractor.Core.Constants;
+using MaNGOS.Extractor.Core.Interfaces;
+using MaNGOS.Extractor.Formats.Dbc;
 
 namespace MaNGOS.Extractor.Formats.Adt.Models;
 
@@ -8,6 +11,55 @@ namespace MaNGOS.Extractor.Formats.Adt.Models;
 /// </summary>
 public sealed class AdtFile
 {
+    private static readonly ConcurrentDictionary<ushort, ushort> AreaTableLookup = new();
+    private static readonly ConcurrentDictionary<ushort, byte> LiquidTypeLookup = new();
+
+    public static void LoadAreaTable(IArchiveReader archive)
+    {
+        if (!archive.TryReadFile("DBFilesClient\\AreaTable.dbc", out var data)) return;
+        var reader = DbcReader<AreaTableRow>.Parse(data.Span);
+        foreach (var row in reader.Rows)
+        {
+            ushort areaId = (ushort)row.Id;
+            ushort flags = (ushort)reader.GetUInt32(row, 3); // field 3 = area flags
+            AreaTableLookup[areaId] = flags;
+        }
+    }
+
+    public static void LoadLiquidTypeTable(IArchiveReader archive)
+    {
+        if (!archive.TryReadFile("DBFilesClient\\LiquidType.dbc", out var data)) return;
+        var reader = DbcReader<AreaTableRow>.Parse(data.Span);
+        foreach (var row in reader.Rows)
+        {
+            ushort id = (ushort)row.Id;
+            uint soundBank = reader.GetUInt32(row, 3); // field 3 = SoundBank
+            byte flag = soundBank switch {
+                0 => 0x08, // WATER
+                1 => 0x02, // OCEAN
+                2 => 0x01, // MAGMA
+                3 => 0x04, // SLIME
+                _ => 0x08
+            };
+            LiquidTypeLookup[id] = flag;
+        }
+    }
+
+    public static byte AreaIdToAreaType(ushort areaId)
+    {
+        if (!AreaTableLookup.TryGetValue(areaId, out var flags)) return 1;
+        if ((flags & 0x40) != 0) return 2;
+        if ((flags & 0x80) != 0) return 3;
+        if ((flags & 1) != 0) return 1;
+        return 0;
+    }
+
+    public static ushort AreaIdToAreaFlags(ushort areaId)
+        => AreaTableLookup.TryGetValue(areaId, out var f) ? f : (ushort)0xFFFF;
+
+    public static LiquidType LiquidTypeToFlags(ushort rawTypeId)
+        => LiquidTypeLookup.TryGetValue(rawTypeId, out var f) ? (LiquidType)f : LiquidType.Water;
+
     private readonly float[] _heights;
     private readonly ushort[] _areaIds;
     private readonly LiquidData[] _liquids;

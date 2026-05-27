@@ -105,16 +105,25 @@ public sealed class VmapExtractorService
 
             for (uint groupIdx = 0; groupIdx < wmoResult.Root!.Header.GroupCount; groupIdx++)
             {
-                string groupName = $"{wmoName}{groupIdx:D3}";
-                var bbMin = wmoResult.Root.Header.BoundingBoxMin;
-                var bbMax = wmoResult.Root.Header.BoundingBoxMax;
+                // PORT-005: load group file to get actual geometry
+                string groupFilePath = wmoName.Replace(".wmo", $"{groupIdx:D3}.wmo");
+                var grpFile = await _wmoParser.ParseGroupAsync(groupFilePath, (int)groupIdx, wmoName, ct);
+
+                var bbMin = grpFile != null ? grpFile.Header.BoundingBoxMin : wmoResult.Root.Header.BoundingBoxMin;
+                var bbMax = grpFile != null ? grpFile.Header.BoundingBoxMax : wmoResult.Root.Header.BoundingBoxMax;
+
                 var group = new VmapGroupData
                 {
-                    Name = groupName,
-                    Flags = GetGroupFlags(wmoResult.Groups, (int)groupIdx),
+                    Name           = groupFilePath,
+                    Flags          = grpFile?.Header.Flags ?? 0,
+                    GroupWmoId     = grpFile?.Header.GroupWmoId ?? groupIdx,
                     BoundingBoxMin = new Vector3Min(bbMin.X, bbMin.Y, bbMin.Z),
                     BoundingBoxMax = new Vector3Min(bbMax.X, bbMax.Y, bbMax.Z),
-                    LiquidType = wmoResult.Root.Header.LiquidType
+                    LiquidFlags    = grpFile?.Header.LiquidType ?? 0,
+                    Vertices       = BuildVertexArray(grpFile?.Vertices),
+                    Indices        = BuildIndexArray(grpFile?.Triangles),
+                    MobaData       = BuildMobaData(grpFile?.Batches),
+                    BatchCount     = grpFile?.Batches.Length ?? 0
                 };
                 tile.AddGroup(group);
             }
@@ -155,17 +164,45 @@ public sealed class VmapExtractorService
         }
     }
 
-    private static uint GetGroupFlags(WmoGroupFile[] groups, int idx)
+    private static float[] BuildVertexArray(WmoVertex[]? vertices)
     {
-        if (idx >= groups.Length)
-            return 0;
+        if (vertices == null || vertices.Length == 0) return Array.Empty<float>();
+        var result = new float[vertices.Length * 3];
+        for (int i = 0; i < vertices.Length; i++)
+        {
+            result[i * 3]     = vertices[i].X;
+            result[i * 3 + 1] = vertices[i].Y;
+            result[i * 3 + 2] = vertices[i].Z;
+        }
+        return result;
+    }
 
-        uint flags = 0;
-        if (groups[idx].Header.IsIndoor)
-            flags |= 0x00000001;
-        if (groups[idx].Header.HasLiquids)
-            flags |= 0x00000004;
-        return flags;
+    private static ushort[] BuildIndexArray(WmoTriangle[]? triangles)
+    {
+        if (triangles == null || triangles.Length == 0) return Array.Empty<ushort>();
+        var result = new ushort[triangles.Length * 3];
+        for (int i = 0; i < triangles.Length; i++)
+        {
+            result[i * 3]     = triangles[i].I0;
+            result[i * 3 + 1] = triangles[i].I1;
+            result[i * 3 + 2] = triangles[i].I2;
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Builds MobaEx data (batch index counts) matching C++ MobaEx formula.
+    /// C++: MOBA is uint16[], each batch is 12 uint16 entries (24 bytes).
+    /// MOBA[8] within each batch = Count (uint16) = number of triangle indices.
+    /// In C# WmoBatch (6×uint32), Count occupies the low 16 bits of VertexCount.
+    /// </summary>
+    private static int[] BuildMobaData(WmoBatch[]? batches)
+    {
+        if (batches == null || batches.Length == 0) return Array.Empty<int>();
+        var result = new int[batches.Length];
+        for (int i = 0; i < batches.Length; i++)
+            result[i] = (int)(batches[i].VertexCount & 0xFFFF);
+        return result;
     }
 
     private static string? GetWmoName(string[] names, int index)

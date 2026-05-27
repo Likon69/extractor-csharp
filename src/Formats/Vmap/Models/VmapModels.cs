@@ -10,10 +10,15 @@ public struct VmapTileHeader
 public struct VmapGroupData
 {
     public string Name;
-    public uint Flags;
+    public uint Flags;       // mogpFlags
+    public uint GroupWmoId;  // unique WMO group ID
     public Vector3Min BoundingBoxMin;
     public Vector3Min BoundingBoxMax;
-    public uint LiquidType;
+    public uint LiquidFlags; // liquflags (was LiquidType)
+    public float[]? Vertices; // flat X,Y,Z,... (nVertices * 3 elements)
+    public ushort[]? Indices; // triangle indices (nTriangles * 3 elements)
+    public int[]? MobaData;   // batch counts for GRP section (one int per batch)
+    public int BatchCount;
 }
 
 public struct Vector3Min

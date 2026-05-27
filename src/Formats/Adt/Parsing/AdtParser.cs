@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO;
 using Microsoft.Extensions.Logging;
 using MaNGOS.Extractor.Core.Binary;
@@ -11,13 +12,13 @@ public sealed class AdtParser
 {
     private readonly IArchiveReader _archive;
     private readonly ILogger<AdtParser> _logger;
-    private readonly Dictionary<string, AdtFile> _cache;
+    private readonly ConcurrentDictionary<string, AdtFile> _cache;
 
     public AdtParser(IArchiveReader archive, ILogger<AdtParser> logger)
     {
         _archive = archive;
         _logger = logger;
-        _cache = new Dictionary<string, AdtFile>(StringComparer.OrdinalIgnoreCase);
+        _cache = new ConcurrentDictionary<string, AdtFile>(StringComparer.OrdinalIgnoreCase);
     }
 
     public async Task<AdtParseResult> ParseAsync(string path, uint mapId, int tileX, int tileY, CancellationToken ct = default)
@@ -50,7 +51,7 @@ public sealed class AdtParser
             warnings.Add($"Invalid ADT magic: expected MVER (0x{MagicBytes.Mver:X}), got 0x{magic:X}");
             return AdtParseResult.Failed(warnings);
         }
-        reader.Skip(4);
+        reader.Skip(8);   // skip MVER size (4) + MVER version data (4)
 
         var mhdrOffset = 0u;
         var mhdrSize = 0u;
@@ -103,11 +104,8 @@ public sealed class AdtParser
         }
 
         reader.Seek((int)mhdrOffset);
-        reader.Skip(8);
-
         var header = new AdtMhdr
         {
-            FileDataId = reader.ReadUInt32(),
             Flags = reader.ReadUInt32(),
             McinOffset = reader.ReadUInt32(),
             MtexOffset = reader.ReadUInt32(),
@@ -132,16 +130,18 @@ public sealed class AdtParser
             return AdtParseResult.Failed(warnings);
         }
 
-        string[] textures = header.MtexOffset > 0 ? ParseTextures(reader, header.MtexOffset) : Array.Empty<string>();
+        // MHDR offsets are relative to &flags (= mhdrOffset), not file start.
+        // C++ confirms: getMCIN() returns (uint8*)&flags + offsMCIN.
+        string[] textures = header.MtexOffset > 0 ? ParseTextures(reader, mhdrOffset + header.MtexOffset) : Array.Empty<string>();
 
-        string[] wmos = ParseWmoNames(reader, header.MwmoOffset, header.MwidOffset);
-        string[] models = ParseModelNames(reader, header.MmdxOffset, header.MmidOffset);
+        string[] wmos = ParseWmoNames(reader, mhdrOffset + header.MwmoOffset, mhdrOffset + header.MwidOffset);
+        string[] models = ParseModelNames(reader, mhdrOffset + header.MmdxOffset, mhdrOffset + header.MmidOffset);
 
-        AdtMfbo? mfbo = header.MfboOffset > 0 ? ParseMfbo(reader, header.MfboOffset) : null;
+        AdtMfbo? mfbo = header.MfboOffset > 0 ? ParseMfbo(reader, mhdrOffset + header.MfboOffset) : null;
 
-        AdtMcin[] mcinEntries = header.McinOffset > 0 ? ParseMcin(reader, header.McinOffset) : Array.Empty<AdtMcin>();
+        AdtMcin[] mcinEntries = header.McinOffset > 0 ? ParseMcin(reader, mhdrOffset + header.McinOffset) : Array.Empty<AdtMcin>();
 
-        AdtMh2o? waterData = header.Mh2oOffset > 0 ? ParseMh2o(reader, header.Mh2oOffset) : null;
+        AdtMh2o? waterData = header.Mh2oOffset > 0 ? ParseMh2o(reader, mhdrOffset + header.Mh2oOffset) : null;
 
         float[] allHeights = new float[256 * AdtMcvt.TotalVertices];
         ushort[] areaIds = new ushort[256];
@@ -150,18 +150,15 @@ public sealed class AdtParser
         // Parse liquid data for all 256 cells from MH2O chunk
         if (waterData.HasValue && mcinEntries.Length == 256)
         {
+            uint mh2oBase = waterData.Value.ChunkDataStart;
             for (int i = 0; i < 256; i++)
             {
                 var cell = waterData.Value.Cells[i];
                 if (!cell.HasData)
                     continue;
 
-                var mcnkEntry = mcinEntries[i];
-                if (mcnkEntry.Offset > 0)
-                {
-                    int mcnkStart = (int)mcnkEntry.Offset;
-                    liquids[i] = ParseMh2oCellData(reader, (uint)mcnkStart, cell);
-                }
+                uint instanceOffset = mh2oBase + cell.HeaderOffset;
+                liquids[i] = ParseMh2oCellData(reader, instanceOffset, mh2oBase, cell);
             }
         }
 
@@ -188,8 +185,8 @@ public sealed class AdtParser
             liquids[i] = chunkResult.Liquid;
         }
 
-        var mddf = header.MddfOffset > 0 ? ParseMddf(reader, header.MddfOffset) : Array.Empty<AdtMddf>();
-        var modf = header.ModfOffset > 0 ? ParseModf(reader, header.ModfOffset) : Array.Empty<AdtModf>();
+        var mddf = header.MddfOffset > 0 ? ParseMddf(reader, mhdrOffset + header.MddfOffset) : Array.Empty<AdtMddf>();
+        var modf = header.ModfOffset > 0 ? ParseModf(reader, mhdrOffset + header.ModfOffset) : Array.Empty<AdtModf>();
 
         // Parse texture IDs for each MCNK from MCLY chunks
         var chunkTextureIds = new uint[256];
@@ -209,56 +206,62 @@ public sealed class AdtParser
         return new AdtParseResult(tile, warnings);
     }
 
-    private LiquidData ParseMh2oCellData(SpanReader reader, uint offset, in AdtMh2oCell cell)
+    private LiquidData ParseMh2oCellData(SpanReader reader, uint instanceOffset, uint mh2oDataBase, in AdtMh2oCell cell)
     {
-        if (!cell.HasData || offset == 0)
+        if (!cell.HasData || instanceOffset == 0)
             return LiquidData.Empty;
 
-        reader.Seek((int)offset);
+        reader.Seek((int)instanceOffset);
 
-        var header = new AdtMh2oHeader
-        {
-            OffsetX = reader.ReadByte(),
-            OffsetY = reader.ReadByte(),
-            Width = reader.ReadByte(),
-            Height = reader.ReadByte(),
-            LiquidType = reader.ReadUInt16(),
-            Flags = reader.ReadUInt16(),
-            MinHeight = reader.ReadFloat(),
-            MaxHeight = reader.ReadFloat()
-        };
+        // Read SLiquidInstance in exact WotLK binary order (20 bytes total)
+        ushort liquidType  = reader.ReadUInt16();
+        ushort vertexFormat = reader.ReadUInt16();
+        float  minHeight   = reader.ReadFloat();
+        float  maxHeight   = reader.ReadFloat();
+        byte   offsetX     = reader.ReadByte();
+        byte   offsetY     = reader.ReadByte();
+        byte   width       = reader.ReadByte();
+        byte   height      = reader.ReadByte();
+        uint   ofsHeightMap = reader.ReadUInt32();
+        uint   ofsInfoMask  = reader.ReadUInt32();
+
+        if (width == 0 || height == 0)
+            return LiquidData.Empty;
 
         var liquid = new LiquidData
         {
-            LiquidLevel = header.MinHeight,
-            PrimaryType = (LiquidType)(header.LiquidType & 0x0F),
-            OffsetX = header.OffsetX,
-            OffsetY = header.OffsetY,
-            Width = header.Width,
-            Height = header.Height
+            LiquidLevel = minHeight,
+            RawTypeId   = liquidType,
+            PrimaryType = AdtFile.LiquidTypeToFlags(liquidType),
+            OffsetX     = offsetX,
+            OffsetY     = offsetY,
+            Width       = width,
+            Height      = height
         };
 
-        if (header.HasHeightValues && cell.HeightCount > 0)
+        // Read 64-bit show mask (8 bytes = 64 bits, bit[y*Width+x] = sub-cell visible)
+        if (ofsInfoMask != 0)
         {
-            int depthCount = (int)cell.HeightCount;
-            var depths = new float[depthCount];
-            for (int i = 0; i < depthCount; i++)
-                depths[i] = reader.ReadFloat();
-            liquid.DepthMap = depths;
+            reader.Seek((int)(mh2oDataBase + ofsInfoMask));
+            ulong mask = 0;
+            for (int b = 0; b < 8; b++)
+                mask |= (ulong)reader.ReadByte() << (b * 8);
+            liquid.ShowMask = mask;
+        }
+        else
+        {
+            liquid.ShowMask = ulong.MaxValue; // all sub-cells visible
         }
 
-        if (header.HasVertexColor && cell.VertexCount > 0)
+        // Read height floats: (Width+1)*(Height+1) values
+        if (ofsHeightMap != 0)
         {
-            int vertexCount = (int)cell.VertexCount;
-            var colors = new (byte R, byte G, byte B, byte A)[vertexCount];
-            for (int i = 0; i < vertexCount; i++)
-            {
-                colors[i].R = reader.ReadByte();
-                colors[i].G = reader.ReadByte();
-                colors[i].B = reader.ReadByte();
-                colors[i].A = reader.ReadByte();
-            }
-            liquid.VertexColors = colors;
+            reader.Seek((int)(mh2oDataBase + ofsHeightMap));
+            int count = (width + 1) * (height + 1);
+            var depths = new float[count];
+            for (int i = 0; i < count; i++)
+                depths[i] = reader.ReadFloat();
+            liquid.DepthMap = depths;
         }
 
         return liquid;
@@ -275,23 +278,19 @@ public sealed class AdtParser
             reader.Seek(savedPos);
             return 0;
         }
-        reader.Skip(4);
-
-        uint mclyOffset = reader.ReadUInt32();
+        reader.Skip(4);  // skip MCNK size
+        // ofsLayer is at MCNK data offset 0x1C = 28 bytes from data start
+        // fields before it: flags(4)+ix(4)+iy(4)+nLayers(4)+nDoodadRefs(4)+ofsHeight(4)+ofsNormal(4) = 28 bytes
+        reader.Skip(28); // skip to ofsLayer
+        uint mclyOffset = reader.ReadUInt32(); // reads ofsLayer at 0x1C ✓
         reader.Seek(savedPos);
 
         if (mclyOffset == 0)
             return 0;
 
-        reader.Seek(mcnkOffset + (int)mclyOffset + 8);
-        uint count = reader.ReadUInt32();
-
-        uint primaryTextureId = 0;
-        if (count > 0)
-        {
-            reader.Skip(16);
-            primaryTextureId = reader.ReadUInt32();
-        }
+        // MCLY: entries of 16 bytes [textureId, flags, alphaOffset, effectId], no count field.
+        reader.Seek(mcnkOffset + (int)mclyOffset + 8); // skip MCLY magic + size
+        uint primaryTextureId = reader.ReadUInt32(); // layer 0 textureId
 
         reader.Seek(savedPos);
         return primaryTextureId;
@@ -348,9 +347,11 @@ public sealed class AdtParser
             return Array.Empty<string>();
 
         reader.Seek((int)widOffset);
-        reader.Skip(8);
-        uint widSize = reader.ReadUInt32();
+        reader.Skip(4);             // skip MWID magic
+        uint widSize = reader.ReadUInt32(); // read chunk data size
         uint count = widSize / 4;
+        uint maxCount = (uint)Math.Max(0, reader.Remaining / 4);
+        if (count > maxCount) count = maxCount;
 
         var offsets = new uint[count];
         for (uint i = 0; i < count; i++)
@@ -376,9 +377,11 @@ public sealed class AdtParser
             return Array.Empty<string>();
 
         reader.Seek((int)midOffset);
-        reader.Skip(8);
-        uint midSize = reader.ReadUInt32();
+        reader.Skip(4);             // skip MMID magic
+        uint midSize = reader.ReadUInt32(); // read chunk data size
         uint count = midSize / 4;
+        uint maxCount = (uint)Math.Max(0, reader.Remaining / 4);
+        if (count > maxCount) count = maxCount;
 
         var offsets = new uint[count];
         for (uint i = 0; i < count; i++)
@@ -447,20 +450,21 @@ public sealed class AdtParser
 
         uint size = reader.ReadUInt32();
 
+        // Position is now at offset+8 = start of chunk data (base for all relative offsets)
+        uint chunkDataStart = (uint)reader.Position;
+
         var cells = new AdtMh2oCell[256];
         for (int i = 0; i < 256; i++)
         {
             cells[i] = new AdtMh2oCell
             {
-                HeaderOffset = reader.ReadUInt32(),
-                LayerCount = reader.ReadUInt32(),
-                HeightCount = reader.ReadUInt32(),
-                VertexCount = reader.ReadUInt32()
+                HeaderOffset    = reader.ReadUInt32(),
+                LayerCount      = reader.ReadUInt32(),
+                RenderMaskOffset = reader.ReadUInt32()
             };
         }
 
-        // Store the cells array in a temp field - simplified for now
-        var h2o = new AdtMh2o { Cells = cells };
+        var h2o = new AdtMh2o { Cells = cells, ChunkDataStart = chunkDataStart };
         return h2o;
     }
 
@@ -473,53 +477,63 @@ public sealed class AdtParser
         if (magic != MagicBytes.Mcnk)
         {
             warnings.Add($"MCNK at {startOffset} has invalid magic: {MagicBytes.FourCCToString(magic)}");
-            return default;
+            return (new float[AdtMcvt.TotalVertices], 0, waterData ?? LiquidData.Empty);
         }
 
-        reader.Skip(4);
+        reader.Skip(4); // size (already known)
 
+        // WotLK MCNK header — 128 bytes (0x80), all offsets from MCNK magic start
         var header = new AdtMcnk
         {
-            GridX = reader.ReadUInt32(),
-            GridY = reader.ReadUInt32(),
-            McvtOffset = reader.ReadUInt32(),
-            McnrOffset = reader.ReadUInt32(),
-            MclyOffset = reader.ReadUInt32(),
-            McrfOffset = reader.ReadUInt32(),
-            Unused1 = reader.ReadUInt32(),
-            MclvOffset = reader.ReadUInt32(),
-            AreaId = reader.ReadUInt32(),
-            DoodleDbId = reader.ReadUInt32(),
-            Holes = reader.ReadUInt32(),
-            LowQualityGridHeight = reader.ReadUInt16(),
-            NumLayers = reader.ReadUInt16(),
-            NumDoodadRefs = reader.ReadUInt32(),
-            DoodadReferencesOffset = reader.ReadUInt32(),
-            MtxpOffset = reader.ReadUInt32(),
-            MtxpSize = reader.ReadUInt32(),
-            McnrOffset2 = reader.ReadUInt32(),
-            McnrSize = reader.ReadUInt32(),
-            PositionX = reader.ReadFloat(),
-            PositionY = reader.ReadFloat(),
-            PositionZ = reader.ReadFloat(),
-            DoodadFlags = reader.ReadUInt32(),
-            TextureId0 = reader.ReadUInt32(),
-            TextureId1 = reader.ReadUInt32(),
-            Unknown1 = reader.ReadUInt32(),
-            Unknown2 = reader.ReadUInt32()
+            Flags         = reader.ReadUInt32(), // 0x00
+            IndexX        = reader.ReadUInt32(), // 0x04
+            IndexY        = reader.ReadUInt32(), // 0x08
+            NLayers       = reader.ReadUInt32(), // 0x0C  ← was missing, caused all below to be wrong
+            NDoodadRefs   = reader.ReadUInt32(), // 0x10  ← was missing
+            OfsHeight     = reader.ReadUInt32(), // 0x14  offset to MCVT (from MCNK magic)
+            OfsNormal     = reader.ReadUInt32(), // 0x18  offset to MCNR
+            OfsLayer      = reader.ReadUInt32(), // 0x1C  offset to MCLY
+            OfsRefs       = reader.ReadUInt32(), // 0x20  offset to MCRF
+            OfsAlpha      = reader.ReadUInt32(), // 0x24
+            SizeAlpha     = reader.ReadUInt32(), // 0x28
+            OfsShadow     = reader.ReadUInt32(), // 0x2C
+            SizeShadow    = reader.ReadUInt32(), // 0x30
+            AreaId        = reader.ReadUInt32(), // 0x34  ← zone/area ID
+            NMapObjRefs   = reader.ReadUInt32(), // 0x38
+            Holes         = reader.ReadUInt32(), // 0x3C  ← low-res holes bitmask
+            LowQualityTex0 = reader.ReadUInt16(), // 0x40
+            LowQualityTex1 = reader.ReadUInt16(), // 0x42
+            LowQualityTex2 = reader.ReadUInt16(), // 0x44
+            LowQualityTex3 = reader.ReadUInt16(), // 0x46
+            LowQualityTex4 = reader.ReadUInt16(), // 0x48
+            LowQualityTex5 = reader.ReadUInt16(), // 0x4A
+            LowQualityTex6 = reader.ReadUInt16(), // 0x4C
+            LowQualityTex7 = reader.ReadUInt16(), // 0x4E
+            NEffectDoodad  = reader.ReadUInt32(), // 0x50
+            OfsSndEmitters = reader.ReadUInt32(), // 0x54
+            NSndEmitters   = reader.ReadUInt32(), // 0x58
+            OfsLiquid      = reader.ReadUInt32(), // 0x5C
+            SizeLiquid     = reader.ReadUInt32(), // 0x60
+            Zpos           = reader.ReadFloat(),  // 0x64  world X
+            Xpos           = reader.ReadFloat(),  // 0x68  world Z
+            Ypos           = reader.ReadFloat(),  // 0x6C  world Y = height base
+            OfsMCCV        = reader.ReadUInt32(), // 0x70
+            Unused1        = reader.ReadUInt32(), // 0x74
+            Unused2        = reader.ReadUInt32(), // 0x78
+            Unused3        = reader.ReadUInt32(), // 0x7C  (pads to 128 bytes total)
         };
 
         float[] heights = new float[AdtMcvt.TotalVertices];
-        if (header.McvtOffset > 0)
+        if (header.OfsHeight > 0)
         {
-            reader.Seek(startOffset + (int)header.McvtOffset);
-            reader.Skip(8);
+            reader.Seek(startOffset + (int)header.OfsHeight);
+            reader.Skip(8); // skip MCVT magic + size
 
             for (int i = 0; i < AdtMcvt.TotalVertices; i++)
-                heights[i] = header.PositionY + reader.ReadFloat();
+                heights[i] = header.Ypos + reader.ReadFloat(); // Ypos = world Y = height base
         }
 
-        return (heights, (ushort)header!.AreaId, waterData ?? LiquidData.Empty);
+        return (heights, (ushort)header.AreaId, waterData ?? LiquidData.Empty);
     }
 
     private AdtMddf[] ParseMddf(SpanReader reader, uint offset)
@@ -549,10 +563,9 @@ public sealed class AdtParser
                 RotationY = reader.ReadFloat(),
                 RotationX = reader.ReadFloat(),
                 RotationZ = reader.ReadFloat(),
-                Scale = reader.ReadFloat(),
+                Scale = reader.ReadUInt16(),
                 Flags = reader.ReadUInt16()
             };
-            reader.Skip(2);
         }
 
         return entries;
@@ -582,15 +595,19 @@ public sealed class AdtParser
                 PositionX = reader.ReadFloat(),
                 PositionY = reader.ReadFloat(),
                 PositionZ = reader.ReadFloat(),
-                RotationY = reader.ReadFloat(),
                 RotationX = reader.ReadFloat(),
+                RotationY = reader.ReadFloat(),
                 RotationZ = reader.ReadFloat(),
-                ScaleX = reader.ReadFloat(),
-                ScaleY = reader.ReadFloat(),
-                ScaleZ = reader.ReadFloat(),
+                LowerBoundsX = reader.ReadFloat(),
+                LowerBoundsY = reader.ReadFloat(),
+                LowerBoundsZ = reader.ReadFloat(),
+                UpperBoundsX = reader.ReadFloat(),
+                UpperBoundsY = reader.ReadFloat(),
+                UpperBoundsZ = reader.ReadFloat(),
                 Flags = reader.ReadUInt16(),
                 DoodadSet = reader.ReadUInt16(),
-                GroupIds = reader.ReadUInt32()
+                NameSet = reader.ReadUInt16(),
+                Scale = reader.ReadUInt16()
             };
         }
 

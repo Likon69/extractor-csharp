@@ -68,10 +68,34 @@ public sealed class MapTile
     public ushort[]? AreaMap { get; set; }
     public ushort[]? HolesMap { get; set; }
     public MapLiquidEntry[]? LiquidMap { get; set; }
+    /// <summary>256 per-MCNK liquid cells (one per chunk), populated from MH2O data.</summary>
+    public MapLiquidCell[]? ChunkLiquids { get; set; }
     public float MinHeight { get; set; }
     public float MaxHeight { get; set; }
 
     public MapTile(uint mapId, int tileX, int tileY) => (MapId, TileX, TileY) = (mapId, tileX, tileY);
+}
+
+/// <summary>
+/// Per-MCNK liquid data used when building the .map liquid section.
+/// Uses MAP_LIQUID_TYPE_* flag values in TypeFlags (Magma=0x01, Ocean=0x02, Slime=0x04, Water=0x08).
+/// </summary>
+public struct MapLiquidCell
+{
+    /// <summary>Raw LiquidType.dbc row ID (written as liquid_entry in .map).</summary>
+    public ushort RawTypeId;
+    /// <summary>MAP_LIQUID_TYPE_* flag: 0x01=Magma, 0x02=Ocean, 0x04=Slime, 0x08=Water.</summary>
+    public byte TypeFlags;
+    public float MinHeight;
+    public byte OffsetX;
+    public byte OffsetY;
+    public byte Width;
+    public byte Height;
+    /// <summary>(Width+1)*(Height+1) height values, or null if flat.</summary>
+    public float[]? Heights;
+    /// <summary>64-bit visibility mask; bit at [y*Width+x] = 1 means sub-cell is visible.</summary>
+    public ulong ShowMask;
+    public bool HasLiquid => TypeFlags != 0;
 }
 
 public readonly struct MapLiquidEntry

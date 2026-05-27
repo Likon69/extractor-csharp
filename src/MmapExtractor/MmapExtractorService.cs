@@ -106,7 +106,7 @@ public sealed class MmapExtractorService
         writer.Write(WowConstants.SubTileSize);
         writer.Write(WowConstants.SubTileSize);
         writer.Write((int)(tileCount * 16));
-        writer.Write(16384);
+        writer.Write(65536); // 1 << DT_POLY_BITS (DT_POLYREF64)
     }
 
     private async Task<bool> ProcessTileAsync(uint mapId, string mapName, int tileX, int tileY, CancellationToken ct)
@@ -179,9 +179,10 @@ public sealed class MmapExtractorService
                 // Box obstacle (3D solid) — area=0 (RC_NULL_AREA) blocks Recast navigation
                 float hs = 0.5f * go.Scale; // half-size XZ
                 float ht = 2.0f * go.Scale; // total height Y
-                float x0 = go.PosX - hs, x1 = go.PosX + hs;
-                float y0 = go.PosY,       y1 = go.PosY + ht;
-                float z0 = go.PosZ - hs, z1 = go.PosZ + hs;
+                // Negate X/Z to match Recast convention used by ExtrudeTileGeometry
+                float x0 = -(go.PosX + hs), x1 = -(go.PosX - hs);
+                float y0 = go.PosY,          y1 = go.PosY + ht;
+                float z0 = -(go.PosZ + hs), z1 = -(go.PosZ - hs);
 
                 int baseIdx = goVerts.Count / 3;
 
@@ -255,8 +256,12 @@ public sealed class MmapExtractorService
                 int chunkX = chunkIdx % 16;
                 int chunkY = chunkIdx / 16;
 
-                float chunkOriginX = adjX * WowConstants.TileSize - WowConstants.MapHalfSize + chunkX * WowConstants.ChunkSize;
-                float chunkOriginZ = adjY * WowConstants.TileSize - WowConstants.MapHalfSize + chunkY * WowConstants.ChunkSize;
+                // PORT-005: correct world coordinates using adjacent tile coordinates
+                float tileOriginX = (32 - adjX) * WowConstants.TileSize;
+                float tileOriginZ = (32 - adjY) * WowConstants.TileSize;
+
+                float chunkOriginX = tileOriginX - chunkX * WowConstants.ChunkSize;
+                float chunkOriginZ = tileOriginZ - chunkY * WowConstants.ChunkSize;
 
                 var chunkHeights = adt.GetChunkHeights(chunkIdx);
 
@@ -268,9 +273,9 @@ public sealed class MmapExtractorService
                     for (int x = 0; x < 9; x++)
                     {
                         float h = AdtMcvt.GetV9(chunkHeights, z, x);
-                        vertices.Add(chunkOriginX + x * v9Step);
+                        vertices.Add(chunkOriginX - x * v9Step);
                         vertices.Add(h);
-                        vertices.Add(chunkOriginZ + z * v9Step);
+                        vertices.Add(chunkOriginZ - z * v9Step);
                     }
                 }
 
@@ -281,9 +286,9 @@ public sealed class MmapExtractorService
                     for (int x = 0; x < 8; x++)
                     {
                         float h = AdtMcvt.GetV8(chunkHeights, z, x);
-                        vertices.Add(chunkOriginX + (x + 0.5f) * v9Step);
+                        vertices.Add(chunkOriginX - (x + 0.5f) * v9Step);
                         vertices.Add(h);
-                        vertices.Add(chunkOriginZ + (z + 0.5f) * v9Step);
+                        vertices.Add(chunkOriginZ - (z + 0.5f) * v9Step);
                     }
                 }
 
@@ -317,16 +322,17 @@ public sealed class MmapExtractorService
 
     private async Task BuildSubTilesAsync(uint mapId, int adtX, int adtY, TileGeometry geometry, CancellationToken ct)
     {
-        float tileOriginX = adtX * WowConstants.TileSize - WowConstants.MapHalfSize;
-        float tileOriginZ = adtY * WowConstants.TileSize - WowConstants.MapHalfSize;
+        // Same Recast coordinate convention as ExtrudeTileGeometry: (32 - adtX) * TileSize
+        float tileOriginX = (32 - adtX) * WowConstants.TileSize;
+        float tileOriginZ = (32 - adtY) * WowConstants.TileSize;
 
         for (int subY = 0; subY < 4; subY++)
         {
             for (int subX = 0; subX < 4; subX++)
             {
                 ct.ThrowIfCancellationRequested();
-                float subOriginX = tileOriginX + subX * WowConstants.SubTileSize;
-                float subOriginZ = tileOriginZ + subY * WowConstants.SubTileSize;
+                float subOriginX = tileOriginX - subX * WowConstants.SubTileSize;
+                float subOriginZ = tileOriginZ - subY * WowConstants.SubTileSize;
 
                 int globalTileX = adtX * 4 + subX;
                 int globalTileY = adtY * 4 + subY;
@@ -415,10 +421,7 @@ public sealed class MmapExtractorService
             writer.Write(MagicBytes.DtNavMeshVersion);
             writer.Write(MagicBytes.MmapVersion);
             writer.Write((uint)navData.Length);
-            writer.Write((byte)1);
-            writer.Write((byte)0);
-            writer.Write((byte)0);
-            writer.Write((byte)0);
+            writer.Write((byte)1);  // usesLiquids
             writer.Write(navData);
         }, ct);
     }

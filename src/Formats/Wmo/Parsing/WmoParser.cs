@@ -45,11 +45,24 @@ public sealed class WmoParser
         var warnings = new List<string>();
         var reader = new SpanReader(data);
 
-        // Read MOHD first
+        // WMO files start with MVER (version header)
         uint magic = reader.ReadUInt32();
-        if (magic != MagicBytes.Mohd)
+        if (magic != MagicBytes.Mver)
         {
-            warnings.Add($"Invalid WMO magic: expected MOHD (0x{MagicBytes.Mohd:X}), got 0x{magic:X}");
+            // Not a standard WMO — try as root without MVER
+            reader.Seek(0);
+        }
+        else
+        {
+            uint mverSize = reader.ReadUInt32();
+            reader.Skip((int)mverSize); // skip version data
+        }
+
+        // Now read MOHD
+        uint moMagic = reader.ReadUInt32();
+        if (moMagic != MagicBytes.Mohd)
+        {
+            warnings.Add($"Invalid WMO magic: expected MOHD (0x{MagicBytes.Mohd:X}), got 0x{moMagic:X}");
             return WmoParseResult.Failed(warnings);
         }
 
@@ -85,7 +98,7 @@ public sealed class WmoParser
             switch (chunkMagic)
             {
                 case MagicBytes.Mogn: // Group names
-                    ParseMogn(reader, chunkSize, groupNames);
+                    ParseMogn(reader, chunkSize2, groupNames);
                     break;
 
                 case MagicBytes.Motx: // Texture names
@@ -109,10 +122,7 @@ public sealed class WmoParser
                     break;
             }
 
-            // Advance to next chunk (align to 4 bytes)
-            int consumed = (int)chunkSize2;
-            int padding = (4 - (consumed % 4)) % 4;
-            reader.Skip(consumed + padding);
+            if (chunkSize2 == 0) break; // Safety guard
         }
 
         var root = new WmoRootFile(
@@ -149,8 +159,14 @@ public sealed class WmoParser
     {
         var reader = new SpanReader(data);
 
-        // Read MOGP magic
+        // WMO group files start with MVER, then MOGP
         uint magic = reader.ReadUInt32();
+        if (magic == MagicBytes.Mver)
+        {
+            uint mverSize = reader.ReadUInt32();
+            reader.Skip((int)mverSize);
+            magic = reader.ReadUInt32(); // read MOGP magic
+        }
         if (magic != MagicBytes.Mogp)
             return null;
 
@@ -188,7 +204,7 @@ public sealed class WmoParser
 
             switch (chunkMagic)
             {
-                case MagicBytes.Movv: // Vertices
+                case MagicBytes.Movt: // Group WMO files use MOVT for vertices (MOVV is root-only portal vertices)
                     ParseMovv(reader, chunkSize2, vertices);
                     break;
 
@@ -213,9 +229,7 @@ public sealed class WmoParser
                     break;
             }
 
-            // Align to 4 bytes
-            int padding = (4 - ((int)chunkSize2 % 4)) % 4;
-            reader.Skip((int)chunkSize2 + padding);
+            if (chunkSize2 == 0) break; // Safety guard
         }
 
         return new WmoGroupFile(
@@ -238,45 +252,41 @@ public sealed class WmoParser
             if (!string.IsNullOrEmpty(name))
                 names.Add(name);
         }
+        int padding = (4 - ((int)chunkSize % 4)) % 4;
+        if (reader.Position < endPos + padding)
+            reader.Skip(endPos + padding - reader.Position);
     }
 
     private void ParseMotx(SpanReader reader, uint size, List<string> textures)
     {
-        // May be null-terminated strings or UTF-16
-        var start = reader.Remaining;
         var data = reader.ReadSpan((int)size);
-
-        // Try to read as null-terminated ASCII
         int pos = 0;
         while (pos < data.Length)
         {
             int end = data.Slice(pos).IndexOf((byte)0);
             if (end < 0) break;
-
             string tex = Encoding.ASCII.GetString(data.Slice(pos, end));
             if (!string.IsNullOrEmpty(tex))
                 textures.Add(tex);
-
             pos += end + 1;
         }
+        // ReadSpan already advanced reader by size bytes — caller handles padding
     }
 
     private void ParseModn(SpanReader reader, uint size, List<string> names)
     {
-        // Same format as MOTX
         var data = reader.ReadSpan((int)size);
         int pos = 0;
         while (pos < data.Length)
         {
             int end = data.Slice(pos).IndexOf((byte)0);
             if (end < 0) break;
-
             string name = Encoding.ASCII.GetString(data.Slice(pos, end));
             if (!string.IsNullOrEmpty(name))
                 names.Add(name);
-
             pos += end + 1;
         }
+        // ReadSpan already advanced reader by size bytes — caller handles padding
     }
 
     private void ParseModd(SpanReader reader, uint size, List<WmoDoodadPlacement> placements)

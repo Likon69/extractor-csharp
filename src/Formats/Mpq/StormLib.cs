@@ -36,7 +36,7 @@ public static class StormLib
     /// <param name="scope">Search scope flags.</param>
     /// <param name="fileHandle">Output file handle on success.</param>
     /// <returns>True if file opened successfully.</returns>
-    [DllImport(DllName, EntryPoint = "SFileOpenFileEx", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
+    [DllImport(DllName, EntryPoint = "SFileOpenFileEx", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
     public static extern bool SFileOpenFileEx(
         IntPtr archive,
         string fileName,
@@ -85,10 +85,10 @@ public static class StormLib
     /// <param name="findData">Output buffer for the first file information.</param>
     /// <param name="listFile">Path to external listfile (pass IntPtr.Zero for none).</param>
     /// <returns>Find handle for SFileFindNextFile/SFileFindClose, or INVALID_HANDLE_VALUE on failure.</returns>
-    [DllImport(DllName, EntryPoint = "SFileFindFirstFile", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
+    [DllImport(DllName, EntryPoint = "SFileFindFirstFile", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
     public static extern IntPtr SFileFindFirstFile(
         IntPtr archive,
-        [MarshalAs(UnmanagedType.LPStr)] string searchMask,
+        string searchMask,
         out SFileFindData findData,
         IntPtr listFile);
 
@@ -109,7 +109,7 @@ public static class StormLib
     /// <param name="callback">Callback for each found file.</param>
     /// <param name="userData">User data passed to callback.</param>
     /// <returns>True if enumeration completed.</returns>
-    [DllImport(DllName, EntryPoint = "SFileFindFile", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
+    [DllImport(DllName, EntryPoint = "SFileFindFile", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
     public static extern bool SFileFindFile(
         IntPtr archive,
         string searchMask,
@@ -117,7 +117,7 @@ public static class StormLib
         IntPtr userData);
 
     /// <summary>Checks if a file exists within an archive.</summary>
-    [DllImport(DllName, EntryPoint = "SFileHasFile", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
+    [DllImport(DllName, EntryPoint = "SFileHasFile", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
     public static extern bool SFileHasFile(IntPtr archive, string fileName);
 
     /// <summary>Gets the locale of a file in the archive.</summary>
@@ -125,7 +125,7 @@ public static class StormLib
     /// <param name="fileName">File name in archive.</param>
     /// <param name="fileLocale">Output locale code.</param>
     /// <returns>True if file found.</returns>
-    [DllImport(DllName, EntryPoint = "SFileGetFileLocale", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
+    [DllImport(DllName, EntryPoint = "SFileGetFileLocale", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
     public static extern bool SFileGetFileLocale(
         IntPtr archive,
         string fileName,
@@ -134,7 +134,7 @@ public static class StormLib
     // Archive Information
 
     /// <summary>Gets the number of files in an archive.</summary>
-    [DllImport(DllName, EntryPoint = "SFileGetArchiveName", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
+    [DllImport(DllName, EntryPoint = "SFileGetArchiveName", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
     public static extern bool SFileGetArchiveName(IntPtr archive, [Out] char[] nameBuffer, int bufferLength);
 
     /// <summary>Retrieves archive info (open count, etc.).</summary>
@@ -143,16 +143,18 @@ public static class StormLib
 
     // Open Flags
 
-    /// <summary>Flags for SFileOpenArchive.</summary>
+    /// <summary>Flags for SFileOpenArchive (values from StormLib.h bundled with MaNGOS).</summary>
     public static class OpenArchiveFlags
     {
-        public const uint NoListfile = 0x00100000;  // Don't load internal listfile
-        public const uint NoAttributes = 0x00200000; // Don't load file attributes
-        public const uint MpoListfile = 0x00400000; // Listfile only in MPQ archive
-        public const uint ForceMpqHeader = 0x00800000; // Detect archive type by signature
-        public const uint ReadOnly = 0x01000000; // Open archive in read-only mode
-        public const uint ShareWrite = 0x02000000; // Allow other processes to open for write
-        public const uint ForceListfile = 0x04000000; // Force reading listfile from archive
+        public const uint ReadOnly = 0x00000100;       // STREAM_FLAG_READ_ONLY
+        public const uint ShareWrite = 0x00000200;      // STREAM_FLAG_WRITE_SHARE
+        public const uint NoListfile = 0x00010000;      // MPQ_OPEN_NO_LISTFILE
+        public const uint NoAttributes = 0x00020000;    // MPQ_OPEN_NO_ATTRIBUTES
+        public const uint NoHeaderSearch = 0x00040000;  // MPQ_OPEN_NO_HEADER_SEARCH
+        public const uint ForceMpqV1 = 0x00080000;      // MPQ_OPEN_FORCE_MPQ_V1
+        public const uint CheckSectorCrc = 0x00100000;  // MPQ_OPEN_CHECK_SECTOR_CRC
+        public const uint Patch = 0x00200000;           // MPQ_OPEN_PATCH
+        public const uint ForceListfile = 0x00400000;   // MPQ_OPEN_FORCE_LISTFILE
     }
 
     /// <summary>Flags for SFileOpenFileEx scope parameter.</summary>
@@ -172,51 +174,25 @@ public static class StormLib
 
 /// <summary>
 /// Data structure filled by SFileFindFirstFile and SFileFindNextFile.
-/// Note: StormLib stores some values as 64-bit even on 32-bit builds for alignment.
+/// Layout matches StormLib SFILE_FIND_DATA (Unicode, x64).
 /// </summary>
 [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
 public struct SFileFindData
 {
     public const int MaxFileNameLength = 260;
 
-    /// <summary>File name (null-terminated Unicode string).</summary>
+    /// <summary>Full file name (null-terminated Unicode, MAX_PATH chars).</summary>
     [MarshalAs(UnmanagedType.ByValTStr, SizeConst = MaxFileNameLength)]
-    public string FileName;
+    public string FileName;      // TCHAR cFileName[MAX_PATH] = 520 bytes (Unicode)
 
-    /// <summary>Size of the file in bytes.</summary>
-    public ulong FileSize;
+    private IntPtr _szPlainName; // TCHAR* szPlainName (pointer into FileName) = 8 bytes
 
-    /// <summary>File flags (compressed, encrypted, etc.).</summary>
-    public uint FileFlags;
-
-    /// <summary>File attributes (Win32 FILE_ATTRIBUTE_* flags).</summary>
-    public uint CompSize; // Compressed size in bytes
-
-    /// <summary>Creation time.</summary>
-    public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
-
-    /// <summary>Last access time.</summary>
-    public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
-
-    /// <summary>Last write time.</summary>
-    public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
-
-    /// <summary>CRC32 of the file (if present).</summary>
-    public uint FileCRC;
-
-    /// <summary>Locale identifier (e.g., 0x00000409 for enUS).</summary>
-    public uint Locale;
-
-    /// <summary>Sector size (for compressed files).</summary>
-    public uint SectorSize;
-
-    /// <summary>Hash table entry (internal).</summary>
-    public uint HashIndex;
-
-    /// <summary>Block table entry (internal).</summary>
-    public uint BlockIndex;
-
-    // Unused padding to match StormLib's internal layout
-    private uint _reserved0;
-    private uint _reserved1;
+    public uint HashIndex;       // DWORD dwHashIndex
+    public uint BlockIndex;      // DWORD dwBlockIndex
+    public uint FileSize;        // DWORD dwFileSize
+    public uint FileFlags;       // DWORD dwFileFlags
+    public uint CompSize;        // DWORD dwCompSize
+    public uint FileTimeLo;      // DWORD dwFileTimeLo
+    public uint FileTimeHi;      // DWORD dwFileTimeHi
+    public uint Locale;          // LCID  lcLocale
 }
