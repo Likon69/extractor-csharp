@@ -32,7 +32,16 @@ public sealed class AdtParser
             return AdtParseResult.Failed(new List<string> { $"ADT not found: {path}" });
         }
 
-        var result = await Task.Run(() => ParseInternal(path, mapId, tileX, tileY, data, ct), ct);
+        AdtParseResult result;
+        try
+        {
+            result = await Task.Run(() => ParseInternal(path, mapId, tileX, tileY, data, ct), ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse ADT {Path}", path);
+            return AdtParseResult.Failed(new List<string> { $"Parse error on {path}: {ex.Message}" });
+        }
 
         if (result.Success && result.Tile != null)
             _cache[path] = result.Tile;
@@ -45,6 +54,12 @@ public sealed class AdtParser
         var warnings = new List<string>();
         var reader = new SpanReader(data);
 
+        if (data.Length < 12)
+        {
+            warnings.Add($"ADT file too small: {path} ({data.Length} bytes)");
+            return AdtParseResult.Failed(warnings);
+        }
+
         uint magic = reader.ReadUInt32();
         if (magic != MagicBytes.Mver)
         {
@@ -56,7 +71,9 @@ public sealed class AdtParser
         var mhdrOffset = 0u;
         var mhdrSize = 0u;
 
-        while (reader.Remaining > 8)
+        bool stopRootScan = false;
+
+        while (reader.Remaining >= 8 && !stopRootScan)
         {
             uint chunkMagic = reader.ReadUInt32();
             uint chunkSize = reader.ReadUInt32();
@@ -66,6 +83,12 @@ public sealed class AdtParser
                 case MagicBytes.Mhdr:
                     mhdrOffset = (uint)reader.Position;
                     mhdrSize = chunkSize;
+                    if (chunkSize > int.MaxValue || chunkSize > (uint)reader.Remaining)
+                    {
+                        warnings.Add($"Invalid chunk size for {MagicBytes.FourCCToString(chunkMagic)}: {chunkSize} (remaining={reader.Remaining})");
+                        stopRootScan = true;
+                        break;
+                    }
                     reader.Skip((int)chunkSize);
                     break;
 
@@ -78,17 +101,35 @@ public sealed class AdtParser
                 case MagicBytes.Modf:
                 case MagicBytes.Mfbo:
                 case MagicBytes.Mh2o:
+                    if (chunkSize > int.MaxValue || chunkSize > (uint)reader.Remaining)
+                    {
+                        warnings.Add($"Invalid chunk size for {MagicBytes.FourCCToString(chunkMagic)}: {chunkSize} (remaining={reader.Remaining})");
+                        stopRootScan = true;
+                        break;
+                    }
                     reader.Skip((int)chunkSize);
                     break;
 
                 default:
                     if (chunkMagic == MagicBytes.Mcnk)
                     {
+                        if (chunkSize > int.MaxValue || chunkSize > (uint)reader.Remaining)
+                        {
+                            warnings.Add($"Invalid chunk size for {MagicBytes.FourCCToString(chunkMagic)}: {chunkSize} (remaining={reader.Remaining})");
+                            stopRootScan = true;
+                            break;
+                        }
                         reader.Skip((int)chunkSize);
                     }
                     else
                     {
                         warnings.Add($"Unknown chunk at root level: {MagicBytes.FourCCToString(chunkMagic)}");
+                        if (chunkSize > int.MaxValue || chunkSize > (uint)reader.Remaining)
+                        {
+                            warnings.Add($"Invalid chunk size for {MagicBytes.FourCCToString(chunkMagic)}: {chunkSize} (remaining={reader.Remaining})");
+                            stopRootScan = true;
+                            break;
+                        }
                         reader.Skip((int)chunkSize);
                     }
                     break;

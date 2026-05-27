@@ -340,11 +340,15 @@ static bool rasterizeTri(const float* v0, const float* v1, const float* v2,
 	z1 = rcClamp(z1, 0, h - 1);
 
 	// Clip the triangle into all grid cells it touches.
-	float buf[7 * 3 * 4];
+	// Increased from 7 to 32 vertices per section: WoW terrain triangles span ~14 grid cells,
+	// causing the polygon splitting to produce >7 vertices after a few Z-clip iterations.
+	// 32 vertices × 3 components × 4 sections = 384 floats = 1536 bytes.
+	static const int RC_MAX_POLY_VERTS = 32;
+	float buf[RC_MAX_POLY_VERTS * 3 * 4];
 	float* in = buf;
-	float* inRow = buf + 7 * 3;
-	float* p1 = inRow + 7 * 3;
-	float* p2 = p1 + 7 * 3;
+	float* inRow = buf + RC_MAX_POLY_VERTS * 3;
+	float* p1 = inRow + RC_MAX_POLY_VERTS * 3;
+	float* p2 = p1 + RC_MAX_POLY_VERTS * 3;
 
 	rcVcopy(&in[0], v0);
 	rcVcopy(&in[1 * 3], v1);

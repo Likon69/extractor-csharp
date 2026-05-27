@@ -9,11 +9,15 @@ using MaNGOS.Extractor.Formats.Adt.Models;
 using MaNGOS.Extractor.Formats.Adt.Parsing;
 using MaNGOS.Extractor.Formats.Wdt;
 using MaNGOS.Extractor.MmapExtractor.Recast;
+using MaNGOS.Extractor.UI;
 
 namespace MaNGOS.Extractor.MmapExtractor;
 
 public sealed class MmapExtractorService
 {
+    private static readonly object NativeBuildLock = new();
+    private static int _nativeProbeCounter;
+
     private readonly IArchiveReader _archive;
     private readonly WdtReader _wdtReader;
     private readonly AdtParser _adtParser;
@@ -64,6 +68,10 @@ public sealed class MmapExtractorService
 
         var tiles = _wdtReader.GetExistingTiles();
         _logger.LogInformation("Found {Count} tiles for map {MapName}", tiles.Count, mapName);
+
+        // Write mmap header upfront so the map file exists even if extraction is cancelled later.
+        WriteMmapHeader(mapId, (uint)tiles.Count);
+
         int successCount = 0;
 
         var options = new ParallelOptions
@@ -90,6 +98,7 @@ public sealed class MmapExtractorService
         });
 
         _logger.LogInformation("Mmap extraction complete: {Success}/{Total} tiles", successCount, tiles.Count);
+        // Refresh header at end in case future metadata changes.
         WriteMmapHeader(mapId, (uint)tiles.Count);
         return successCount;
     }
@@ -100,13 +109,15 @@ public sealed class MmapExtractorService
         using var stream = new FileStream(mmapPath, FileMode.Create, FileAccess.Write);
         using var writer = new BinaryWriter(stream);
 
+        // MaNGOS mmap header: origin is at the world-space corner of the map grid.
+        // For the standard full-grid: (-MapHalfSize, 0, -MapHalfSize).
         writer.Write(-WowConstants.MapHalfSize);
         writer.Write(0f);
         writer.Write(-WowConstants.MapHalfSize);
-        writer.Write(WowConstants.SubTileSize);
-        writer.Write(WowConstants.SubTileSize);
-        writer.Write((int)(tileCount * 16));
-        writer.Write(65536); // 1 << DT_POLY_BITS (DT_POLYREF64)
+        writer.Write(WowConstants.TileSize);   // gridSize — ADT-level grid spacing
+        writer.Write(WowConstants.TileSize);   // gridCellSize
+        writer.Write((int)tileCount);          // number of ADT tiles that have data
+        writer.Write(1 << 20);                 // maxPolyRef: 1 << DT_POLY_BITS (DT_POLYREF64)
     }
 
     private async Task<bool> ProcessTileAsync(uint mapId, string mapName, int tileX, int tileY, CancellationToken ct)
@@ -322,22 +333,40 @@ public sealed class MmapExtractorService
 
     private async Task BuildSubTilesAsync(uint mapId, int adtX, int adtY, TileGeometry geometry, CancellationToken ct)
     {
-        // Same Recast coordinate convention as ExtrudeTileGeometry: (32 - adtX) * TileSize
+        // ADT geometry spans [tileOrigin - TileSize, tileOrigin] in both X and Z.
+        // Sub-tiles divide this range into 4 equal slices along each axis.
         float tileOriginX = (32 - adtX) * WowConstants.TileSize;
         float tileOriginZ = (32 - adtY) * WowConstants.TileSize;
+        float adtMinX = tileOriginX - WowConstants.TileSize;
+        float adtMinZ = tileOriginZ - WowConstants.TileSize;
 
         for (int subY = 0; subY < 4; subY++)
         {
             for (int subX = 0; subX < 4; subX++)
             {
                 ct.ThrowIfCancellationRequested();
-                float subOriginX = tileOriginX - subX * WowConstants.SubTileSize;
-                float subOriginZ = tileOriginZ - subY * WowConstants.SubTileSize;
+                float subOriginX = adtMinX + subX * WowConstants.SubTileSize;
+                float subOriginZ = adtMinZ + subY * WowConstants.SubTileSize;
 
                 int globalTileX = adtX * 4 + subX;
                 int globalTileY = adtY * 4 + subY;
 
+                int probeId = Interlocked.Increment(ref _nativeProbeCounter);
+                if (probeId <= 200)
+                {
+                    FileLog.Write(
+                        $"MMAP probe #{probeId} begin map={mapId} adt=({adtX},{adtY}) sub=({subX},{subY}) global=({globalTileX},{globalTileY}) verts={geometry.VertexCount} tris={geometry.IndexCount / 3}",
+                        LogLevel.Information);
+                }
+
                 var navData = BuildNavMeshTileSync(geometry, globalTileX, globalTileY, subOriginX, subOriginZ);
+                if (probeId <= 200)
+                {
+                    FileLog.Write(
+                        $"MMAP probe #{probeId} end global=({globalTileX},{globalTileY}) nav={(navData == null ? "null" : navData.Length.ToString())}",
+                        LogLevel.Information);
+                }
+
                 if (navData != null)
                     await WriteMmtileAsync(mapId, adtX, adtY, subX, subY, navData, ct);
             }
@@ -391,16 +420,23 @@ public sealed class MmapExtractorService
             byte* outData;
             int outSize;
 
-            if (!RecastNative.BuildTile(&p, v, vertCount, i, triCount, a, &outData, &outSize))
-                return null;
-
-            var result = new byte[outSize];
-            fixed (byte* dest = result)
+            lock (NativeBuildLock)
             {
-                Buffer.MemoryCopy(outData, dest, outSize, outSize);
+                if (!RecastNative.BuildTile(&p, v, vertCount, i, triCount, a, &outData, &outSize))
+                    return null;
+
+                if (outData == null || outSize <= 0)
+                    return null;
+
+                var result = new byte[outSize];
+                fixed (byte* dest = result)
+                {
+                    Buffer.MemoryCopy(outData, dest, outSize, outSize);
+                }
+
+                RecastNative.FreeBuffer(outData);
+                return result;
             }
-            RecastNative.FreeBuffer(outData);
-            return result;
         }
     }
 
@@ -410,9 +446,11 @@ public sealed class MmapExtractorService
         {
             Directory.CreateDirectory(_outputDir);
 
-            int globalSubY = adtY * 4 + subY;
-            int globalSubX = adtX * 4 + subX;
-            string fileName = $"{mapId:D3}{globalSubY:D3}{globalSubX:D3}.mmtile";
+            // MaNGOS mmtile naming: {mapId:D3}{globalTileY:D2}{globalTileX:D2}.mmtile
+            // Matches MoveMap::loadMap() convention: fmt("%03u%02u%02u.mmtile", mapId, tileY, tileX)
+            int globalTileY = adtY * 4 + subY;
+            int globalTileX = adtX * 4 + subX;
+            string fileName = $"{mapId:D3}{globalTileY:D2}{globalTileX:D2}.mmtile";
             string filePath = Path.Combine(_outputDir, fileName);
 
             using var stream = new FileStream(filePath, FileMode.Create, FileAccess.Write);
@@ -421,7 +459,7 @@ public sealed class MmapExtractorService
             writer.Write(MagicBytes.DtNavMeshVersion);
             writer.Write(MagicBytes.MmapVersion);
             writer.Write((uint)navData.Length);
-            writer.Write((byte)1);  // usesLiquids
+            writer.Write(1u);  // usesLiquids as uint32 (MaNGOS C++ writes uint32, not byte)
             writer.Write(navData);
         }, ct);
     }

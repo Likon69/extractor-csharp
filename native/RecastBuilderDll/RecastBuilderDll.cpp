@@ -33,7 +33,10 @@ bool BuildTile(
 
     rcHeightfield* hf = rcAllocHeightfield();
     if (!hf)
+    {
+        delete ctx;
         return false;
+    }
 
     int gridWidth, gridHeight;
     rcCalcGridSize(bmin, bmax, params->CellSize, &gridWidth, &gridHeight);
@@ -41,6 +44,7 @@ bool BuildTile(
     if (!rcCreateHeightfield(ctx, *hf, gridWidth, gridHeight, bmin, bmax, params->CellSize, params->CellHeight))
     {
         rcFreeHeightField(hf);
+        delete ctx;
         return false;
     }
 
@@ -57,6 +61,7 @@ bool BuildTile(
     {
         if (allocAreas) delete[] areas;
         rcFreeHeightField(hf);
+        delete ctx;
         return false;
     }
 
@@ -70,6 +75,7 @@ bool BuildTile(
     if (!chf)
     {
         rcFreeHeightField(hf);
+        delete ctx;
         return false;
     }
 
@@ -77,6 +83,7 @@ bool BuildTile(
     {
         rcFreeCompactHeightfield(chf);
         rcFreeHeightField(hf);
+        delete ctx;
         return false;
     }
 
@@ -84,22 +91,25 @@ bool BuildTile(
     {
         rcFreeCompactHeightfield(chf);
         rcFreeHeightField(hf);
+        delete ctx;
         return false;
     }
 
+    // Heightfield is no longer needed after compact heightfield is built.
     rcFreeHeightField(hf);
+    hf = nullptr;  // Prevent double-free on error paths below.
 
     if (!rcBuildDistanceField(ctx, *chf))
     {
         rcFreeCompactHeightfield(chf);
-        rcFreeHeightField(hf);
+        delete ctx;
         return false;
     }
 
     if (!rcBuildRegions(ctx, *chf, 0, (int)params->MinRegionArea, (int)params->MergeRegionArea))
     {
         rcFreeCompactHeightfield(chf);
-        rcFreeHeightField(hf);
+        delete ctx;
         return false;
     }
 
@@ -107,7 +117,7 @@ bool BuildTile(
     if (!cset)
     {
         rcFreeCompactHeightfield(chf);
-        rcFreeHeightField(hf);
+        delete ctx;
         return false;
     }
 
@@ -119,20 +129,18 @@ bool BuildTile(
     {
         rcFreeContourSet(cset);
         rcFreeCompactHeightfield(chf);
-
-        rcFreeHeightField(hf);
+        delete ctx;
         return false;
     }
 
     int nvp = params->MaxVertsPerPoly > 0 ? params->MaxVertsPerPoly : 6;
-
 
     rcPolyMesh* pmesh = rcAllocPolyMesh();
     if (!pmesh)
     {
         rcFreeContourSet(cset);
         rcFreeCompactHeightfield(chf);
-        rcFreeHeightField(hf);
+        delete ctx;
         return false;
     }
 
@@ -141,7 +149,7 @@ bool BuildTile(
         rcFreePolyMesh(pmesh);
         rcFreeContourSet(cset);
         rcFreeCompactHeightfield(chf);
-        rcFreeHeightField(hf);
+        delete ctx;
         return false;
     }
 
@@ -151,7 +159,7 @@ bool BuildTile(
         rcFreePolyMesh(pmesh);
         rcFreeContourSet(cset);
         rcFreeCompactHeightfield(chf);
-        rcFreeHeightField(hf);
+        delete ctx;
         return false;
     }
 
@@ -163,18 +171,17 @@ bool BuildTile(
         rcFreePolyMesh(pmesh);
         rcFreeContourSet(cset);
         rcFreeCompactHeightfield(chf);
-        rcFreeHeightField(hf);
+        delete ctx;
         return false;
     }
 
     rcFreeContourSet(cset);
+    cset = nullptr;
     rcFreeCompactHeightfield(chf);
-    rcFreeHeightField(hf);
+    chf = nullptr;
 
     for (int i = 0; i < pmesh->npolys; i++)
     {
-        // RC_WALKABLE_AREA = 63 = default area, set to 0 (NAV_GROUND)
-        // NAV_WATER should be set based on liquid detection
         if (pmesh->areas[i] == RC_WALKABLE_AREA)
             pmesh->areas[i] = 1;
         
@@ -203,6 +210,11 @@ bool BuildTile(
     memcpy(navParams.bmin, pmesh->bmin, sizeof(float) * 3);
     memcpy(navParams.bmax, pmesh->bmax, sizeof(float) * 3);
 
+    // Cell size/height — required by dtCreateNavMeshData for BV-tree quantization
+    // and vertex dequantization.  Previously left at 0 (undefined behavior).
+    navParams.cs = pmesh->cs;
+    navParams.ch = pmesh->ch;
+
     // World units (not cell-based)
     navParams.walkableHeight = params->WalkableHeight * params->CellHeight;
     navParams.walkableRadius = 0.400f;  // spec: hardcoded exact HB value, NOT walkableRadius * cellSize
@@ -216,9 +228,7 @@ bool BuildTile(
     {
         rcFreePolyMeshDetail(dmesh);
         rcFreePolyMesh(pmesh);
-        rcFreeContourSet(cset);
-        rcFreeCompactHeightfield(chf);
-        rcFreeHeightField(hf);
+        delete ctx;
         return false;
     }
 

@@ -228,11 +228,35 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 using var archives = MpqArchiveCollection.FromWoWDirectory(path, locale, _loggerFactory);
                 diag.Add($"{archives.ArchiveCount} archives MPQ ouvertes.");
 
-                if (!archives.TryReadFile("DBFilesClient\\Map.dbc", out var data))
+                ReadOnlyMemory<byte> data = default;
+                var mapDbcCandidates = new[]
+                {
+                    "DBFilesClient\\Map.dbc",
+                    "DBFilesClient\\map.dbc",
+                    "dbfilesclient\\map.dbc",
+                    "DBFilesClient/Map.dbc",
+                    "Map.dbc"
+                };
+
+                string? selectedCandidate = null;
+                foreach (var candidate in mapDbcCandidates)
+                {
+                    if (!archives.TryReadFile(candidate, out data))
+                        continue;
+
+                    selectedCandidate = candidate;
+                    break;
+                }
+
+                if (selectedCandidate == null)
                 {
                     diag.Add($"Map.dbc introuvable dans les archives MPQ.");
+                    foreach (var candidate in mapDbcCandidates)
+                        diag.Add($"  test {candidate}: exists={archives.FileExists(candidate)}");
                     return new List<MapSelectionItem>();
                 }
+
+                diag.Add($"Map.dbc trouvé via: {selectedCandidate}");
 
                 var reader = DbcReader<MapDbcRow>.Parse(data.Span);
                 diag.Add($"Map.dbc: {reader.RowCount} entrées.");
@@ -436,6 +460,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         var ts = DateTime.Now.ToString("HH:mm:ss");
         LogMessages.Add(new LogMessage($"[{ts}] {message}", level));
+        FileLog.Write(message, level);
         while (LogMessages.Count > 1000) LogMessages.RemoveAt(0);
     }
 

@@ -25,9 +25,10 @@ public sealed class MpqArchive : IArchiveReader
         _cache = new ConcurrentDictionary<string, ReadOnlyMemory<byte>>(StringComparer.OrdinalIgnoreCase);
         ArchiveName = Path.GetFileName(path);
 
-        if (!StormLib.SFileOpenArchive(path, 0, StormLib.OpenArchiveFlags.NoListfile, out IntPtr handle))
+        if (!StormLib.SFileOpenArchive(path, 0, StormLib.OpenArchiveFlags.ReadOnly, out IntPtr handle))
         {
-            throw new MpqException($"Failed to open archive '{ArchiveName}'");
+            int error = StormLib.GetLastErrorCode();
+            throw new MpqException($"Failed to open archive '{ArchiveName}' (Win32={error})");
         }
 
         _handle = handle;

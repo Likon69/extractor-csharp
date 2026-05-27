@@ -36,12 +36,17 @@ public sealed class DbcReader<TRow> where TRow : unmanaged
         uint stringBlockSize = reader.ReadUInt32();
 
         int expectedRowSize = Unsafe.SizeOf<TRow>();
-        if (rowSize != expectedRowSize)
-            throw new InvalidDataException($"Row size mismatch: expected {expectedRowSize}, got {rowSize}");
+        if (rowSize < expectedRowSize)
+            throw new InvalidDataException($"Row size mismatch: expected at least {expectedRowSize}, got {rowSize}");
 
         var rows = new TRow[recordCount];
+        int trailingBytes = (int)rowSize - expectedRowSize;
         for (uint i = 0; i < recordCount; i++)
+        {
             rows[i] = reader.Read<TRow>();
+            if (trailingBytes > 0)
+                reader.Skip(trailingBytes);
+        }
 
         var stringBlock = reader.ReadBytes((int)stringBlockSize);
 

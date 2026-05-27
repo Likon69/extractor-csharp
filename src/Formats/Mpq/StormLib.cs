@@ -19,7 +19,7 @@ public static class StormLib
     /// <param name="flags">Open flags (e.g., MPQ_OPEN_NO_LISTFILE).</param>
     /// <param name="handle">Output archive handle on success.</param>
     /// <returns>True if archive opened successfully.</returns>
-    [DllImport(DllName, EntryPoint = "SFileOpenArchive", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
+    [DllImport(DllName, EntryPoint = "SFileOpenArchive", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern bool SFileOpenArchive(
         string path,
         uint priority,
@@ -27,7 +27,7 @@ public static class StormLib
         out IntPtr handle);
 
     /// <summary>Closes an MPQ archive handle.</summary>
-    [DllImport(DllName, EntryPoint = "SFileCloseArchive", CallingConvention = CallingConvention.StdCall)]
+    [DllImport(DllName, EntryPoint = "SFileCloseArchive", CallingConvention = CallingConvention.StdCall, SetLastError = true)]
     public static extern bool SFileCloseArchive(IntPtr archive);
 
     /// <summary>Opens a file within an archive for reading.</summary>
@@ -36,7 +36,7 @@ public static class StormLib
     /// <param name="scope">Search scope flags.</param>
     /// <param name="fileHandle">Output file handle on success.</param>
     /// <returns>True if file opened successfully.</returns>
-    [DllImport(DllName, EntryPoint = "SFileOpenFileEx", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
+    [DllImport(DllName, EntryPoint = "SFileOpenFileEx", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi, SetLastError = true)]
     public static extern bool SFileOpenFileEx(
         IntPtr archive,
         string fileName,
@@ -44,7 +44,7 @@ public static class StormLib
         out IntPtr fileHandle);
 
     /// <summary>Closes a file handle opened by SFileOpenFileEx.</summary>
-    [DllImport(DllName, EntryPoint = "SFileCloseFile", CallingConvention = CallingConvention.StdCall)]
+    [DllImport(DllName, EntryPoint = "SFileCloseFile", CallingConvention = CallingConvention.StdCall, SetLastError = true)]
     public static extern bool SFileCloseFile(IntPtr fileHandle);
 
     /// <summary>Retrieves the size of an opened file.</summary>
@@ -85,7 +85,7 @@ public static class StormLib
     /// <param name="findData">Output buffer for the first file information.</param>
     /// <param name="listFile">Path to external listfile (pass IntPtr.Zero for none).</param>
     /// <returns>Find handle for SFileFindNextFile/SFileFindClose, or INVALID_HANDLE_VALUE on failure.</returns>
-    [DllImport(DllName, EntryPoint = "SFileFindFirstFile", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
+    [DllImport(DllName, EntryPoint = "SFileFindFirstFile", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
     public static extern IntPtr SFileFindFirstFile(
         IntPtr archive,
         string searchMask,
@@ -96,7 +96,7 @@ public static class StormLib
     /// <param name="findHandle">Find handle from SFileFindFirstFile.</param>
     /// <param name="findData">Output buffer for file information.</param>
     /// <returns>True if another file was found.</returns>
-    [DllImport(DllName, EntryPoint = "SFileFindNextFile", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
+    [DllImport(DllName, EntryPoint = "SFileFindNextFile", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
     public static extern bool SFileFindNextFile(IntPtr findHandle, out SFileFindData findData);
 
     /// <summary>Closes a file find handle.</summary>
@@ -109,7 +109,7 @@ public static class StormLib
     /// <param name="callback">Callback for each found file.</param>
     /// <param name="userData">User data passed to callback.</param>
     /// <returns>True if enumeration completed.</returns>
-    [DllImport(DllName, EntryPoint = "SFileFindFile", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
+    [DllImport(DllName, EntryPoint = "SFileFindFile", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
     public static extern bool SFileFindFile(
         IntPtr archive,
         string searchMask,
@@ -117,7 +117,7 @@ public static class StormLib
         IntPtr userData);
 
     /// <summary>Checks if a file exists within an archive.</summary>
-    [DllImport(DllName, EntryPoint = "SFileHasFile", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
+    [DllImport(DllName, EntryPoint = "SFileHasFile", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi, SetLastError = true)]
     public static extern bool SFileHasFile(IntPtr archive, string fileName);
 
     /// <summary>Gets the locale of a file in the archive.</summary>
@@ -125,7 +125,7 @@ public static class StormLib
     /// <param name="fileName">File name in archive.</param>
     /// <param name="fileLocale">Output locale code.</param>
     /// <returns>True if file found.</returns>
-    [DllImport(DllName, EntryPoint = "SFileGetFileLocale", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
+    [DllImport(DllName, EntryPoint = "SFileGetFileLocale", CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Ansi)]
     public static extern bool SFileGetFileLocale(
         IntPtr archive,
         string fileName,
@@ -170,22 +170,24 @@ public static class StormLib
     public const int SeekBegin = 0;
     public const int SeekCurrent = 1;
     public const int SeekEnd = 2;
+
+    public static int GetLastErrorCode() => Marshal.GetLastWin32Error();
 }
 
 /// <summary>
 /// Data structure filled by SFileFindFirstFile and SFileFindNextFile.
-/// Layout matches StormLib SFILE_FIND_DATA (Unicode, x64).
+/// Layout matches StormLib SFILE_FIND_DATA (ANSI, x64).
 /// </summary>
-[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+[StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
 public struct SFileFindData
 {
     public const int MaxFileNameLength = 260;
 
-    /// <summary>Full file name (null-terminated Unicode, MAX_PATH chars).</summary>
+    /// <summary>Full file name (null-terminated ANSI, MAX_PATH chars).</summary>
     [MarshalAs(UnmanagedType.ByValTStr, SizeConst = MaxFileNameLength)]
-    public string FileName;      // TCHAR cFileName[MAX_PATH] = 520 bytes (Unicode)
+    public string FileName;      // char cFileName[MAX_PATH]
 
-    private IntPtr _szPlainName; // TCHAR* szPlainName (pointer into FileName) = 8 bytes
+    private IntPtr _szPlainName; // char* szPlainName (pointer into FileName) = 8 bytes
 
     public uint HashIndex;       // DWORD dwHashIndex
     public uint BlockIndex;      // DWORD dwBlockIndex

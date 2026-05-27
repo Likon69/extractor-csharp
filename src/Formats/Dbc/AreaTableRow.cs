@@ -3,10 +3,11 @@ using System.Runtime.InteropServices;
 namespace MaNGOS.Extractor.Formats.Dbc;
 
 /// <summary>
-/// AreaTable.dbc row — minimal for area flag lookup.
-/// Field 0 = ID, Field 1 = AreaName (string), Field 2 = Flags (bitmask).
+/// Leading fields for AreaTable.dbc / LiquidType.dbc access.
+/// Field 0 = ID, field 3 is read by callers for flags/sound bank.
+/// Extra fields differ by client build and are intentionally omitted.
 /// </summary>
-[StructLayout(LayoutKind.Sequential, Size = 144)]
+[StructLayout(LayoutKind.Sequential, Size = 16)]
 public struct AreaTableRow
 {
     public uint Id;
