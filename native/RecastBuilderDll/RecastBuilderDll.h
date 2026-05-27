@@ -1,42 +1,53 @@
 #pragma once
 
 #ifdef RECASTBUILDERDLL_EXPORTS
-#define RECASTBUILDERDLL_API __declspec(dllexport)
+#define RECAST_API __declspec(dllexport)
 #else
-#define RECASTBUILDERDLL_API __declspec(dllimport)
+#define RECAST_API __declspec(dllimport)
 #endif
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include <cstdint>
 
+// Must match MaNGOS.Extractor.MmapExtractor.Recast.RecastBuildParams (C# StructLayout.Sequential).
 struct RecastBuildParams
 {
-    float BoundingBoxMinX, BoundingBoxMinY, BoundingBoxMinZ;
-    float BoundingBoxMaxX, BoundingBoxMaxY, BoundingBoxMaxZ;
+    float BoundingBoxMinX;
+    float BoundingBoxMinY;
+    float BoundingBoxMinZ;
+    float BoundingBoxMaxX;
+    float BoundingBoxMaxY;
+    float BoundingBoxMaxZ;
+
     float CellSize;
     float CellHeight;
     float WalkableSlopeAngle;
-    int WalkableHeight;
-    int WalkableRadius;
-    int WalkableClimb;
-    int TileX;
-    int TileY;
+    int   WalkableHeight;
+    int   WalkableRadius;
+    int   WalkableClimb;
+    int   TileX;
+    int   TileY;
+
     float MinRegionArea;
     float MergeRegionArea;
     float MaxSimplificationError;
-    int MaxVertsPerPoly;
+
+    int   MaxVertsPerPoly;
 };
 
-RECASTBUILDERDLL_API bool BuildTile(
-    RecastBuildParams* params,
-    float* verts, int vertCount,
-    int* tris, int triCount,
-    unsigned char* areaIds,
-    unsigned char** outData, int* outSize);
+extern "C"
+{
+    RECAST_API bool BuildTile(
+        const RecastBuildParams* params,
+        const float* verts, int vertCount,
+        const int*   tris,  int triCount,
+        const uint8_t* areaIds,
+        const float* offMeshConVerts,
+        const float* offMeshConRads,
+        const uint8_t* offMeshConDirs,
+        const uint8_t* offMeshConAreas,
+        const uint16_t* offMeshConFlags,
+        int offMeshConCount,
+        uint8_t** outData, int* outSize);
 
-RECASTBUILDERDLL_API void FreeBuffer(void* buffer);
-
-#ifdef __cplusplus
+    RECAST_API void FreeBuffer(void* ptr);
 }
-#endif

@@ -85,8 +85,9 @@ public static class Program
                     walkableHeight: 11,
                     walkableRadius: 2,
                     walkableClimb: 5);
+                string roadDir = Path.Combine(options.OutputPath, "roadmaps");
                 var svc = new MmapExtractorService(archives, _loggerFactory, mmapDir,
-                    recast, options.Threads, options.GoSpawnsPath, offMeshPath: null);
+                    recast, options.Threads, options.GoSpawnsPath, offMeshPath: null, roadMapsDir: roadDir);
                 int tiles = await svc.ExtractMapAsync(mapId, mapName, progress, ct);
                 Console.WriteLine($"  [Mmap] {tiles} tiles extracted.");
             }

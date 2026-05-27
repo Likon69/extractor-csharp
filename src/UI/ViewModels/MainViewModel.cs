@@ -137,9 +137,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public ObservableCollection<LogMessage> LogMessages { get; } = new();
 
-    public MainViewModel(ILoggerFactory loggerFactory)
+    private Action<string, LogLevel>? _logCallback;
+    private DateTime _lastUiLog = DateTime.MinValue;
+
+    public MainViewModel()
     {
-        _loggerFactory = loggerFactory;
+        _logCallback = (msg, lvl) =>
+        {
+            // Always write to file, but throttle UI updates to avoid freeze
+            FileLog.Write(msg, lvl);
+            if (lvl >= LogLevel.Error || (DateTime.UtcNow - _lastUiLog).TotalMilliseconds >= 200)
+            {
+                _lastUiLog = DateTime.UtcNow;
+                System.Windows.Application.Current?.Dispatcher.BeginInvoke(() => AddLog(msg, lvl));
+            }
+        };
+        _loggerFactory = LoggerFactory.Create(b => b.AddProvider(new FileLogLoggerProvider(_logCallback)));
         _tileGrid = new TileGridViewModel();
         _configPath = Path.Combine(AppContext.BaseDirectory, "ExtractorConfig.json");
 
@@ -152,7 +165,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         LoadConfig();
     }
 
-    public MainViewModel() : this(LoggerFactory.Create(b => { })) { }
+    // Keep for designer/XAML preview
+    // public MainViewModel() : this(...) is the real constructor above
 
     private void BrowsePath(bool isWowPath)
     {
@@ -403,7 +417,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 {
                     AddLog($"[Mmap] Extracting {mapName}...");
                     var recastConfig = new RecastConfig(CellSize, CellHeight, WalkableSlopeAngle, WalkableHeight, WalkableRadius, WalkableClimb);
-                    int tiles = await new MmapExtractorService(_archives, _loggerFactory, mmapDir, recastConfig, ThreadCount, GoSpawnsPath, OffMeshPath)
+                    int tiles = await new MmapExtractorService(_archives, _loggerFactory, mmapDir, recastConfig, ThreadCount, GoSpawnsPath, OffMeshPath, roadDir)
                         .ExtractMapAsync((uint)map.MapId, mapName, progress, _cts.Token);
                     processed += tiles;
                     ProcessedTiles = processed;

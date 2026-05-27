@@ -14,10 +14,6 @@ using MaNGOS.Extractor.Formats.Wmo.Parsing;
 
 namespace MaNGOS.Extractor.VmapExtractor;
 
-/// <summary>
-/// Extracts visibility map data (vmaps) from WMO and M2 models.
-/// Produces VMAP tile files with model references and bounding data.
-/// </summary>
 public sealed class VmapExtractorService
 {
     private readonly IArchiveReader _archive;
@@ -38,27 +34,28 @@ public sealed class VmapExtractorService
         _adtParser = new AdtParser(archive, loggerFactory.CreateLogger<AdtParser>());
         _wmoParser = new WmoParser(archive, loggerFactory.CreateLogger<WmoParser>());
         _writer = new VmapFileWriter(outputDir, loggerFactory.CreateLogger<VmapFileWriter>());
+        _logger.LogInformation("[Vmap] Output directory: {OutputDir}", outputDir);
     }
 
-    /// <summary>
-    /// Extracts VMAP data for a specific map.
-    /// </summary>
     public async Task<int> ExtractMapAsync(
         uint mapId,
         string mapName,
         IProgress<TileProgressEvent>? progress,
         CancellationToken ct = default)
     {
-        _logger.LogInformation("Starting vmap extraction for {MapName}", mapName);
+        _logger.LogInformation("[Vmap] Starting vmap extraction for {MapName} (id={MapId})", mapName, mapId);
 
         if (!await _wdtReader.LoadAsync(mapName, ct))
         {
-            _logger.LogError("Failed to load WDT for map: {MapName}", mapName);
+            _logger.LogError("[Vmap] Failed to load WDT for map: {MapName}", mapName);
             return 0;
         }
 
         var tiles = _wdtReader.GetExistingTiles();
-        int successCount = 0;
+        _logger.LogInformation("[Vmap] Found {Count} ADT tiles for {MapName}", tiles.Count, mapName);
+
+        int successCount = 0, failCount = 0;
+        int totalWmos = 0, totalM2s = 0, totalWmoGroups = 0;
 
         foreach (var (tileX, tileY) in tiles)
         {
@@ -67,28 +64,34 @@ public sealed class VmapExtractorService
             progress?.Report(new TileProgressEvent(
                 (int)mapId, tileX, tileY, TileStatus.Processing, ExtractionPhase.Vmap));
 
-            bool success = await ProcessTileAsync(mapId, mapName, tileX, tileY, ct);
+            var (success, wmos, m2s, groups) = await ProcessTileAsync(mapId, mapName, tileX, tileY, ct);
 
             progress?.Report(new TileProgressEvent(
                 (int)mapId, tileX, tileY,
                 success ? TileStatus.Done : TileStatus.Failed,
                 ExtractionPhase.Vmap));
 
-            if (success)
-                successCount++;
+            if (success) successCount++; else failCount++;
+            totalWmos += wmos; totalM2s += m2s; totalWmoGroups += groups;
         }
 
-        _logger.LogInformation("Vmap extraction complete: {Success}/{Total} tiles", successCount, tiles.Count);
+        _logger.LogInformation("[Vmap] Extraction complete for {MapName}: {Success} OK, {Failed} failed, {Total} tiles. " +
+            "Total: {Wmos} WMOs ({Groups} groups), {M2s} M2 models",
+            mapName, successCount, failCount, tiles.Count, totalWmos, totalWmoGroups, totalM2s);
         return successCount;
     }
 
-    private async Task<bool> ProcessTileAsync(uint mapId, string mapName, int tileX, int tileY, CancellationToken ct)
+    private async Task<(bool ok, int wmoCount, int m2Count, int groupCount)> ProcessTileAsync(uint mapId, string mapName, int tileX, int tileY, CancellationToken ct)
     {
+        int wmoCount = 0, m2Count = 0, wmoGroupCount = 0;
         string adtPath = $"World\\Maps\\{mapName}\\{mapName}_{tileX:D2}_{tileY:D2}.adt";
 
         var result = await _adtParser.ParseAsync(adtPath, mapId, tileX, tileY, ct);
         if (!result.Success)
-            return false;
+        {
+            _logger.LogWarning("[Vmap] Failed to parse ADT ({TileX},{TileY})", tileX, tileY);
+            return (false, 0, 0, 0);
+        }
 
         var tile = new VmapTile(mapId, tileX, tileY);
 
@@ -101,11 +104,14 @@ public sealed class VmapExtractorService
 
             var wmoResult = await _wmoParser.ParseRootAsync(wmoName, ct);
             if (!wmoResult.Success)
+            {
+                _logger.LogWarning("[Vmap] ADT ({TileX},{TileY}): failed to parse WMO root: {WmoName}", tileX, tileY, wmoName);
                 continue;
+            }
 
+            wmoCount++;
             for (uint groupIdx = 0; groupIdx < wmoResult.Root!.Header.GroupCount; groupIdx++)
             {
-                // PORT-005: load group file to get actual geometry
                 string groupFilePath = wmoName.Replace(".wmo", $"{groupIdx:D3}.wmo");
                 var grpFile = await _wmoParser.ParseGroupAsync(groupFilePath, (int)groupIdx, wmoName, ct);
 
@@ -114,18 +120,19 @@ public sealed class VmapExtractorService
 
                 var group = new VmapGroupData
                 {
-                    Name           = groupFilePath,
-                    Flags          = grpFile?.Header.Flags ?? 0,
-                    GroupWmoId     = grpFile?.Header.GroupWmoId ?? groupIdx,
+                    Name = groupFilePath,
+                    Flags = grpFile?.Header.Flags ?? 0,
+                    GroupWmoId = grpFile?.Header.GroupWmoId ?? groupIdx,
                     BoundingBoxMin = new Vector3Min(bbMin.X, bbMin.Y, bbMin.Z),
                     BoundingBoxMax = new Vector3Min(bbMax.X, bbMax.Y, bbMax.Z),
-                    LiquidFlags    = grpFile?.Header.LiquidType ?? 0,
-                    Vertices       = BuildVertexArray(grpFile?.Vertices),
-                    Indices        = BuildIndexArray(grpFile?.Triangles),
-                    MobaData       = BuildMobaData(grpFile?.Batches),
-                    BatchCount     = grpFile?.Batches.Length ?? 0
+                    LiquidFlags = grpFile?.Header.LiquidType ?? 0,
+                    Vertices = BuildVertexArray(grpFile?.Vertices),
+                    Indices = BuildIndexArray(grpFile?.Triangles),
+                    MobaData = BuildMobaData(grpFile?.Batches),
+                    BatchCount = grpFile?.Batches.Length ?? 0
                 };
                 tile.AddGroup(group);
+                wmoGroupCount++;
             }
         }
 
@@ -149,18 +156,23 @@ public sealed class VmapExtractorService
                 Flags = 1
             };
             tile.AddModel(placement);
+            m2Count++;
         }
+
+        _logger.LogInformation("[Vmap] ADT ({TileX},{TileY}): {Wmos} WMOs ({Groups} groups), {M2s} M2 models",
+            tileX, tileY, wmoCount, wmoGroupCount, m2Count);
 
         try
         {
             var tiles = new Dictionary<(int, int), VmapTile> { { (tileX, tileY), tile } };
             await _writer.WriteVmapFilesAsync(mapId, tiles, ct);
-            return true;
+            _logger.LogInformation("[Vmap] ADT ({TileX},{TileY}) written OK", tileX, tileY);
+            return (true, wmoCount, m2Count, wmoGroupCount);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to write vmap tile: {TileX},{TileY}", tileX, tileY);
-            return false;
+            _logger.LogError(ex, "[Vmap] Failed to write vmap tile: ({TileX},{TileY})", tileX, tileY);
+            return (false, wmoCount, m2Count, wmoGroupCount);
         }
     }
 
@@ -170,7 +182,7 @@ public sealed class VmapExtractorService
         var result = new float[vertices.Length * 3];
         for (int i = 0; i < vertices.Length; i++)
         {
-            result[i * 3]     = vertices[i].X;
+            result[i * 3] = vertices[i].X;
             result[i * 3 + 1] = vertices[i].Y;
             result[i * 3 + 2] = vertices[i].Z;
         }
@@ -183,19 +195,13 @@ public sealed class VmapExtractorService
         var result = new ushort[triangles.Length * 3];
         for (int i = 0; i < triangles.Length; i++)
         {
-            result[i * 3]     = triangles[i].I0;
+            result[i * 3] = triangles[i].I0;
             result[i * 3 + 1] = triangles[i].I1;
             result[i * 3 + 2] = triangles[i].I2;
         }
         return result;
     }
 
-    /// <summary>
-    /// Builds MobaEx data (batch index counts) matching C++ MobaEx formula.
-    /// C++: MOBA is uint16[], each batch is 12 uint16 entries (24 bytes).
-    /// MOBA[8] within each batch = Count (uint16) = number of triangle indices.
-    /// In C# WmoBatch (6×uint32), Count occupies the low 16 bits of VertexCount.
-    /// </summary>
     private static int[] BuildMobaData(WmoBatch[]? batches)
     {
         if (batches == null || batches.Length == 0) return Array.Empty<int>();

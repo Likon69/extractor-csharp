@@ -12,10 +12,6 @@ using MaNGOS.Extractor.Formats.Wdt;
 
 namespace MaNGOS.Extractor.MapExtractor;
 
-/// <summary>
-/// Extracts terrain data (.map files) from ADT tiles.
-/// Produces one .map file per tile with heightmaps, area IDs, liquids, and holes.
-/// </summary>
 public sealed class MapExtractorService
 {
     private readonly IArchiveReader _archive;
@@ -34,34 +30,27 @@ public sealed class MapExtractorService
         _wdtReader = new WdtReader(archive);
         _adtParser = new AdtParser(archive, loggerFactory.CreateLogger<AdtParser>());
         _writer = new MapFileWriter(outputDir, loggerFactory.CreateLogger<MapFileWriter>());
+        _logger.LogInformation("[Map] Output directory: {OutputDir}", outputDir);
     }
 
-    /// <summary>
-    /// Extracts terrain data for a specific map.
-    /// </summary>
-    /// <param name="mapId">Map ID.</param>
-    /// <param name="mapName">Map directory name (e.g., "Azeroth").</param>
-    /// <param name="progress">Progress reporter for UI updates.</param>
-    /// <param name="ct">Cancellation token.</param>
-    /// <returns>Number of tiles processed successfully.</returns>
     public async Task<int> ExtractMapAsync(
         uint mapId,
         string mapName,
         IProgress<TileProgressEvent>? progress,
         CancellationToken ct = default)
     {
-        _logger.LogInformation("Starting map extraction for {MapName} (ID: {MapId})", mapName, mapId);
+        _logger.LogInformation("[Map] Starting map extraction for {MapName} (id={MapId})", mapName, mapId);
 
         if (!await _wdtReader.LoadAsync(mapName, ct))
         {
-            _logger.LogError("Failed to load WDT for map: {MapName}", mapName);
+            _logger.LogError("[Map] Failed to load WDT for map: {MapName}", mapName);
             return 0;
         }
 
         var tiles = _wdtReader.GetExistingTiles();
-        _logger.LogInformation("Found {Count} tiles for map {MapName}", tiles.Count, mapName);
+        _logger.LogInformation("[Map] Found {Count} ADT tiles for {MapName}", tiles.Count, mapName);
 
-        int successCount = 0;
+        int successCount = 0, failCount = 0;
 
         foreach (var (tileX, tileY) in tiles)
         {
@@ -77,22 +66,15 @@ public sealed class MapExtractorService
                 success ? TileStatus.Done : TileStatus.Failed,
                 ExtractionPhase.Map));
 
-            if (success)
-                successCount++;
+            if (success) successCount++; else failCount++;
         }
 
-        _logger.LogInformation("Map extraction complete: {Success}/{Total} tiles for {MapName}",
-            successCount, tiles.Count, mapName);
-
+        _logger.LogInformation("[Map] Extraction complete for {MapName}: {Success} OK, {Failed} failed, {Total} total",
+            mapName, successCount, failCount, tiles.Count);
         return successCount;
     }
 
-    private async Task<bool> ProcessTileAsync(
-        uint mapId,
-        string mapName,
-        int tileX,
-        int tileY,
-        CancellationToken ct)
+    private async Task<bool> ProcessTileAsync(uint mapId, string mapName, int tileX, int tileY, CancellationToken ct)
     {
         string adtPath = $"World\\Maps\\{mapName}\\{mapName}_{tileX:D2}_{tileY:D2}.adt";
 
@@ -100,25 +82,31 @@ public sealed class MapExtractorService
 
         if (!result.Success)
         {
-            _logger.LogWarning("Failed to parse ADT: {Path}", adtPath);
+            _logger.LogWarning("[Map] Failed to parse ADT ({TileX},{TileY}): {Path}", tileX, tileY, adtPath);
             return false;
         }
 
+        var adt = result.Tile!;
+        int liquidChunks = 0;
+        for (int i = 0; i < 256; i++)
+            if (adt.GetLiquidData(i).HasLiquid) liquidChunks++;
+
+        _logger.LogInformation("[Map] ADT ({TileX},{TileY}): {Textures} textures, {Wmos} WMOs, {Models} M2s, {LiquidChunks}/256 liquid chunks",
+            tileX, tileY, adt.TextureNames.Length, adt.WmoNames.Length, adt.ModelNames.Length, liquidChunks);
+
         try
         {
-            var mapTile = MapFileWriter.FromAdtTile(result.Tile!);
+            var mapTile = MapFileWriter.FromAdtTile(adt);
             await _writer.WriteTileAsync(mapTile, ct);
+            _logger.LogInformation("[Map] ADT ({TileX},{TileY}) written OK", tileX, tileY);
             return true;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to write map tile: {TileX},{TileY}", tileX, tileY);
+            _logger.LogError(ex, "[Map] Failed to write map tile: ({TileX},{TileY})", tileX, tileY);
             return false;
         }
     }
 
-    internal void ClearCache()
-    {
-        _adtParser.ClearCache();
-    }
+    internal void ClearCache() => _adtParser.ClearCache();
 }

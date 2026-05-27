@@ -12,6 +12,12 @@ internal static class RecastNative
         float* verts, int vertCount,
         int* tris, int triCount,
         byte* areaIds,
+        float* offMeshConVerts,
+        float* offMeshConRads,
+        byte* offMeshConDirs,
+        byte* offMeshConAreas,
+        ushort* offMeshConFlags,
+        int offMeshConCount,
         byte** outData, int* outSize);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]

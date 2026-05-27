@@ -19,6 +19,7 @@ public static class MagicBytes
     public const uint MmapTileMagic = 0x4D4D4150;
     public const uint MmapMagic = MmapTileMagic;
     public const uint MmapVersion = 4;
+    public const uint MmapMultiTileVersion = 5;
     public const uint DtNavMeshVersion = 7;
     public const uint Main = 0x4D41494E;
     public const uint Mamp = 0x4D414D50;

@@ -16,6 +16,8 @@
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>RecastBuilderDll</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <!-- Recast/Detour sources live here — no copy, no submodule -->
+    <RecastRoot>..\..\..\mangostwo-server\dep\recastnavigation</RecastRoot>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
@@ -32,10 +34,8 @@
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
-  <ImportGroup Label="ExtensionSettings">
-  </ImportGroup>
-  <ImportGroup Label="Shared">
-  </ImportGroup>
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="Shared" />
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
@@ -53,16 +53,22 @@
     <IntDir>$(ProjectDir)obj\$(Configuration)\</IntDir>
     <TargetName>RecastBuilderDll</TargetName>
   </PropertyGroup>
+  <!-- Shared include directories: project root + Recast/Detour headers from mangostwo-server -->
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(RecastRoot)\Recast\Include;$(RecastRoot)\Detour\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <BrowseInformation>false</BrowseInformation>
+      <DebugInformationFormat>None</DebugInformationFormat>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <PreprocessorDefinitions>_DEBUG;RECASTBUILDERDLL_EXPORTS;_WINDOWS;_USRDLL;DT_POLYREF64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)Recast\Include;$(ProjectDir)Detour\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <LanguageStandard>stdcpp17</LanguageStandard>
-      <BrowseInformation>false</BrowseInformation>
-      <DebugInformationFormat>None</DebugInformationFormat>
+      <Optimization>Disabled</Optimization>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -78,11 +84,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)Recast\Include;$(ProjectDir)Detour\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <LanguageStandard>stdcpp17</LanguageStandard>
       <Optimization>MaxSpeed</Optimization>
-      <BrowseInformation>false</BrowseInformation>
-      <DebugInformationFormat>None</DebugInformationFormat>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -96,27 +98,29 @@
     <ClInclude Include="RecastBuilderDll.h" />
   </ItemGroup>
   <ItemGroup>
+    <!-- Thin wrapper only — no Recast/Detour code here -->
     <ClCompile Include="RecastBuilderDll.cpp" />
-    <ClCompile Include="Recast\Recast.cpp" />
-    <ClCompile Include="Recast\RecastAlloc.cpp" />
-    <ClCompile Include="Recast\RecastAssert.cpp" />
-    <ClCompile Include="Recast\RecastArea.cpp" />
-    <ClCompile Include="Recast\RecastContour.cpp" />
-    <ClCompile Include="Recast\RecastFilter.cpp" />
-    <ClCompile Include="Recast\RecastLayers.cpp" />
-    <ClCompile Include="Recast\RecastMesh.cpp" />
-    <ClCompile Include="Recast\RecastMeshDetail.cpp" />
-    <ClCompile Include="Recast\RecastRasterization.cpp" />
-    <ClCompile Include="Recast\RecastRegion.cpp" />
-    <ClCompile Include="Detour\DetourAlloc.cpp" />
-    <ClCompile Include="Detour\DetourAssert.cpp" />
-    <ClCompile Include="Detour\DetourCommon.cpp" />
-    <ClCompile Include="Detour\DetourNavMesh.cpp" />
-    <ClCompile Include="Detour\DetourNavMeshBuilder.cpp" />
-    <ClCompile Include="Detour\DetourNavMeshQuery.cpp" />
-    <ClCompile Include="Detour\DetourNode.cpp" />
+    <!-- Recast sources — referenced directly from mangostwo-server, not copied -->
+    <ClCompile Include="$(RecastRoot)\Recast\Source\Recast.cpp" />
+    <ClCompile Include="$(RecastRoot)\Recast\Source\RecastAlloc.cpp" />
+    <ClCompile Include="$(RecastRoot)\Recast\Source\RecastArea.cpp" />
+    <ClCompile Include="$(RecastRoot)\Recast\Source\RecastAssert.cpp" />
+    <ClCompile Include="$(RecastRoot)\Recast\Source\RecastContour.cpp" />
+    <ClCompile Include="$(RecastRoot)\Recast\Source\RecastFilter.cpp" />
+    <ClCompile Include="$(RecastRoot)\Recast\Source\RecastLayers.cpp" />
+    <ClCompile Include="$(RecastRoot)\Recast\Source\RecastMesh.cpp" />
+    <ClCompile Include="$(RecastRoot)\Recast\Source\RecastMeshDetail.cpp" />
+    <ClCompile Include="$(RecastRoot)\Recast\Source\RecastRasterization.cpp" />
+    <ClCompile Include="$(RecastRoot)\Recast\Source\RecastRegion.cpp" />
+    <!-- Detour sources — referenced directly from mangostwo-server, not copied -->
+    <ClCompile Include="$(RecastRoot)\Detour\Source\DetourAlloc.cpp" />
+    <ClCompile Include="$(RecastRoot)\Detour\Source\DetourAssert.cpp" />
+    <ClCompile Include="$(RecastRoot)\Detour\Source\DetourCommon.cpp" />
+    <ClCompile Include="$(RecastRoot)\Detour\Source\DetourNavMesh.cpp" />
+    <ClCompile Include="$(RecastRoot)\Detour\Source\DetourNavMeshBuilder.cpp" />
+    <ClCompile Include="$(RecastRoot)\Detour\Source\DetourNavMeshQuery.cpp" />
+    <ClCompile Include="$(RecastRoot)\Detour\Source\DetourNode.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
-  <ImportGroup Label="ExtensionTargets">
-  </ImportGroup>
+  <ImportGroup Label="ExtensionTargets" />
 </Project>
