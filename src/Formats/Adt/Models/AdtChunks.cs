@@ -54,18 +54,18 @@ public struct AdtMcnk
     public uint Holes;           // 0x3C  low-res holes bitmask
     public ushort LowQualityTex0, LowQualityTex1, LowQualityTex2, LowQualityTex3; // 0x40–0x46
     public ushort LowQualityTex4, LowQualityTex5, LowQualityTex6, LowQualityTex7; // 0x48–0x4E
-    public uint NEffectDoodad;   // 0x50
-    public uint OfsSndEmitters;  // 0x54
-    public uint NSndEmitters;    // 0x58
-    public uint OfsLiquid;       // 0x5C  offset to MCLQ
-    public uint SizeLiquid;      // 0x60
-    public float Zpos;           // 0x64  world X position
-    public float Xpos;           // 0x68  world Z position
-    public float Ypos;           // 0x6C  world Y position = height base for MCVT values
-    public uint OfsMCCV;         // 0x70
-    public uint Unused1;         // 0x74
-    public uint Unused2;         // 0x78
-    public uint Unused3;         // 0x7C  (struct total = 128 bytes = 0x80)
+    public uint PredTex;         // 0x50  (WotLK predTex, unused)
+    public uint NEffectDoodad;   // 0x54
+    public uint OfsSndEmitters;  // 0x58
+    public uint NSndEmitters;    // 0x5C
+    public uint OfsLiquid;       // 0x60  offset to MCLQ
+    public uint SizeLiquid;      // 0x64
+    public float Zpos;           // 0x68  world north-south (WoW X)
+    public float Xpos;           // 0x6C  world east-west   (WoW Y)
+    public float Ypos;           // 0x70  world altitude = height base for MCVT values
+    public uint OfsMCCV;         // 0x74
+    public uint Unused1;         // 0x78
+    public uint Unused2;         // 0x7C  (struct total = 128 bytes = 0x80)
 
     public bool HasHighResHoles => (Flags & FlagHighResHoles) != 0;
     public uint HolesMask => Holes & 0xFFFF;

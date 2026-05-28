@@ -22,6 +22,18 @@ internal static class RecastNative
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     public static extern unsafe void FreeBuffer(void* buffer);
+
+    /// <summary>
+    /// Loads an mmtile (mmapVer=5), builds a dtNavMesh, and runs a straight-path query.
+    /// Returns the number of path points written to outPath, or a negative error code.
+    /// outPath receives (x,y,z) per point.
+    /// </summary>
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern unsafe int TestPathfinding(
+        byte* mmtileData, int mmtileSize,
+        float startX, float startY, float startZ,
+        float endX,   float endY,   float endZ,
+        float* outPath, int maxPathPts);
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -48,5 +60,7 @@ public struct RecastBuildParams
     public float MergeRegionArea;
     public float MaxSimplificationError;
 
-    public int MaxVertsPerPoly;  // MUST be last field
+    public int MaxVertsPerPoly;
+    /// <summary>Border size in voxels. Expanded bbox = tile bbox ± BorderSize*CellSize. Passed to rcBuildRegions.</summary>
+    public int BorderSize;
 }

@@ -102,8 +102,17 @@
                             <Label Grid.Row="2" Grid.Column="0" Content="Slope:"/>
                             <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding WalkableSlopeAngle, UpdateSourceTrigger=PropertyChanged}"/>
 
-                            <Label Grid.Row="3" Grid.Column="0" Content="Threads:"/>
-                            <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding ThreadCount, UpdateSourceTrigger=PropertyChanged}"/>
+                            <Label Grid.Row="3" Grid.Column="0" Content="Threads:" VerticalAlignment="Center"/>
+                            <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBlock VerticalAlignment="Center" FontWeight="Bold" MinWidth="22"
+                                           Text="{Binding ThreadCount, StringFormat={}{0}}"/>
+                                <Slider Minimum="1" Maximum="20"
+                                        Value="{Binding ThreadCount, Mode=TwoWay}"
+                                        IsSnapToTickEnabled="True" TickFrequency="1"
+                                        Width="100" VerticalAlignment="Center" Margin="4,0,0,0"/>
+                                <TextBlock Margin="4,0,0,0" VerticalAlignment="Center" Foreground="#888"
+                                           Text="/ 20"/>
+                            </StackPanel>
 
                             <Label Grid.Row="4" Grid.Column="0" Content="BigBase:"/>
                             <CheckBox Grid.Row="4" Grid.Column="1" IsChecked="{Binding BigBaseUnit}" VerticalAlignment="Center"/>

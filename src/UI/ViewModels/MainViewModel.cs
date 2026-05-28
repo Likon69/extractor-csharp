@@ -32,6 +32,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private MpqArchiveCollection? _archives;
     private HashSet<int>? _savedMapIds;   // restored from config on startup
     private bool _suppressMapSelectionChanged;
+    private bool _isLoadingConfig;
 
     // Window geometry (persisted)
     public double WindowLeft   { get; set; } = double.NaN;
@@ -68,7 +69,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _offMeshPath = Path.Combine(AppContext.BaseDirectory, "offmesh.txt");
     public string OffMeshPath { get => _offMeshPath; set { _offMeshPath = value; OnPropertyChanged(); } }
 
-    public int ThreadCount { get; set; } = 4;
+    public int ThreadCount
+    {
+        get => _threadCount;
+        set { _threadCount = Math.Clamp(value, 1, MaxThreadCount); OnPropertyChanged(); SaveConfig(); }
+    }
+    private int _threadCount = 1;
+    public int MaxThreadCount { get; } = 20;
     public bool SingleTileEnabled { get; set; }
     public int SingleTileX { get; set; }
     public int SingleTileY { get; set; }
@@ -351,6 +358,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public void LoadConfig()
     {
+        _isLoadingConfig = true;
+        try
+        {
         var config = ConfigFileManager.Load(_configPath);
 
         if (config == null)
@@ -402,6 +412,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (config.Maps is { Length: > 0 } savedMaps)
             _savedMapIds = savedMaps.ToHashSet();
         // TryReloadMapList is called by the WowClientPath setter above.
+        } // end try
+        finally
+        {
+            _isLoadingConfig = false;
+        }
     }
 
     public async Task StartExtractionAsync()
@@ -521,6 +536,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public void SaveConfig()
     {
+        if (_isLoadingConfig) return;
         var config = new ExtractorConfig
         {
             WowClientPath = WowClientPath,
@@ -536,8 +552,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
             SingleTileX   = SingleTileX,
             SingleTileY   = SingleTileY,
             RecastConfig  = new RecastConfig(CellSize, CellHeight, WalkableSlopeAngle, WalkableHeight, WalkableRadius, WalkableClimb),
-            WindowLeft    = WindowLeft,
-            WindowTop     = WindowTop,
+            WindowLeft    = double.IsNaN(WindowLeft)  ? 0.0  : WindowLeft,
+            WindowTop     = double.IsNaN(WindowTop)   ? 0.0  : WindowTop,
             WindowWidth   = WindowWidth,
             WindowHeight  = WindowHeight
         };

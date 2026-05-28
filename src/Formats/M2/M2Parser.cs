@@ -45,13 +45,14 @@ public sealed class M2Parser
             return false;
 
         // ModelHeaderOthers byte layout (pragma pack 1) — WotLK offsets:
-        //   offset 220 : uint32 nBoundingTriangles   (= number of uint16 indices, NOT triangle count)
-        //   offset 224 : uint32 ofsBoundingTriangles
-        //   offset 228 : uint32 nBoundingVertices
-        //   offset 232 : uint32 ofsBoundingVertices
+        //   offset 216 : uint32 nBoundingTriangles   (= number of uint16 indices, NOT triangle count)
+        //   offset 220 : uint32 ofsBoundingTriangles
+        //   offset 224 : uint32 nBoundingVertices
+        //   offset 228 : uint32 ofsBoundingVertices
+        // Offset 216 = 4(id)+4(ver)+4*9(nameLen..nViews)+4*30(nColors..ofsTexAnimLookup)+56(floats[14])
         var reader = new SpanReader(data);
 
-        reader.Seek(220);
+        reader.Seek(216);
         int nBoundingIndices = (int)reader.ReadUInt32();
         int ofsBoundingTriangles = (int)reader.ReadUInt32();
         int nBoundingVertices = (int)reader.ReadUInt32();

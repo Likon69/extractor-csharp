@@ -2,13 +2,16 @@ using System.IO;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Globalization;
+using System.Text.RegularExpressions;
 using System.Threading;
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using MaNGOS.Extractor.Core.Constants;
 using MaNGOS.Extractor.Core.Interfaces;
 using MaNGOS.Extractor.Core.Models;
 using MaNGOS.Extractor.Formats.Adt.Models;
 using MaNGOS.Extractor.Formats.Adt.Parsing;
+using MaNGOS.Extractor.Formats.Dbc;
 using MaNGOS.Extractor.Formats.M2;
 using MaNGOS.Extractor.Formats.Wdt;
 using MaNGOS.Extractor.Formats.Wmo.Models;
@@ -20,7 +23,6 @@ namespace MaNGOS.Extractor.MmapExtractor;
 
 public sealed class MmapExtractorService
 {
-    private static readonly object NativeBuildLock = new();
     private readonly IArchiveReader _archive;
     private readonly WdtReader _wdtReader;
     private readonly AdtParser _adtParser;
@@ -32,6 +34,8 @@ public sealed class MmapExtractorService
     private readonly int _maxDegreeOfParallelism;
     private readonly GoSpawn[] _goSpawns;
     private readonly OffMeshConnection[] _offMeshConnections;
+    private readonly IReadOnlyDictionary<uint, GameObjectModelRef> _gameObjectModels;
+    private readonly ConcurrentDictionary<uint, GameObjectModelData?> _gameObjectModelCache = new();
     private readonly string? _offMeshPath;
     private readonly string? _roadMapsDir;
 
@@ -83,10 +87,48 @@ public sealed class MmapExtractorService
 
         // --- Load and log GameObject spawns ---
         _goSpawns = LoadGoSpawns(goSpawnsPath);
+        _gameObjectModels = LoadGameObjectModels();
         if (!string.IsNullOrEmpty(_roadMapsDir))
             _logger.LogInformation("[Mmap] Road mask directory: {Path}", _roadMapsDir);
         if (!Directory.Exists(outputDir))
             Directory.CreateDirectory(outputDir);
+    }
+
+    private IReadOnlyDictionary<uint, GameObjectModelRef> LoadGameObjectModels()
+    {
+        const string dbcPath = "DBFilesClient\\GameObjectDisplayInfo.dbc";
+        if (!_archive.TryReadFile(dbcPath, out var dbcData))
+        {
+            _logger.LogWarning("[Mmap] GameObjectDisplayInfo.dbc not found; GameObject mesh rasterization disabled");
+            return new Dictionary<uint, GameObjectModelRef>();
+        }
+
+        var dbcReader = DbcReader<GameObjectDisplayInfoRow>.Parse(dbcData.Span);
+        var rows = dbcReader.Rows.ToArray();
+        var models = new Dictionary<uint, GameObjectModelRef>(rows.Length);
+
+        foreach (var row in rows)
+        {
+            string modelPath = dbcReader.GetString(row, 1)?.Replace('/', '\\') ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(modelPath))
+                continue;
+
+            string ext = Path.GetExtension(modelPath).ToLowerInvariant();
+            if (ext is ".mdx" or ".mdl")
+            {
+                modelPath = Path.ChangeExtension(modelPath, ".m2");
+                ext = ".m2";
+            }
+
+            bool isWmo = ext == ".wmo";
+            if (!isWmo && ext != ".m2")
+                continue;
+
+            models[row.Id] = new GameObjectModelRef(modelPath, isWmo);
+        }
+
+        _logger.LogInformation("[Mmap] GameObject display map loaded: {Count} model references", models.Count);
+        return models;
     }
 
     private GoSpawn[] LoadGoSpawns(string? goSpawnsPath)
@@ -125,7 +167,9 @@ public sealed class MmapExtractorService
         uint mapId,
         string mapName,
         IProgress<TileProgressEvent>? progress,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        int? onlyTileX = null,
+        int? onlyTileY = null)
     {
         _logger.LogInformation("Starting mmap extraction for {MapName} (id={MapId}) with {Threads} threads",
             mapName, mapId, _maxDegreeOfParallelism);
@@ -137,6 +181,8 @@ public sealed class MmapExtractorService
         }
 
         var tiles = _wdtReader.GetExistingTiles();
+        if (onlyTileX.HasValue && onlyTileY.HasValue)
+            tiles = tiles.Where(t => t.X == onlyTileX.Value && t.Y == onlyTileY.Value).ToList();
         _logger.LogInformation("Found {Count} ADT tiles for map {MapName} (id={MapId})", tiles.Count, mapName, mapId);
 
         // Log GO spawns for this specific map
@@ -247,7 +293,7 @@ public sealed class MmapExtractorService
             float bminX = (31 - tileX) * WowConstants.TileSize;
             float bminZ = (31 - tileY) * WowConstants.TileSize;
 
-            var navData = BuildNavMeshSubTilesSync(geometry, tileX, tileY, maxAdtX, maxAdtY, bminX, bminZ);
+            var navData = BuildNavMeshSubTilesSync(mapId, geometry, tileX, tileY, maxAdtX, maxAdtY, bminX, bminZ, ct);
             if (navData.All(blob => blob == null || blob.Length == 0))
             {
                 _logger.LogWarning("[Mmap] BuildTile returned empty for all sub-tiles in ADT ({TileX},{TileY})", tileX, tileY);
@@ -256,7 +302,7 @@ public sealed class MmapExtractorService
             await WriteMmtileAsync(mapId, tileY, tileX, navData, ct);
             return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogError(ex, "Failed to build mmtile: {TileX},{TileY}", tileX, tileY);
             return false;
@@ -322,6 +368,13 @@ public sealed class MmapExtractorService
                 }
             }
 
+            if (modelVerts.Count == 0 && (seenWmoIds.Count > 0 || seenM2Ids.Count > 0))
+            {
+                _logger.LogWarning(
+                    "[Mmap] ADT ({CX},{CY}): WMO/M2 geometry is ZERO tris ({WMOs} WMOs, {M2s} M2 placements seen but all filtered — check MOPY flags or group parsing)",
+                    centerX, centerY, seenWmoIds.Count, seenM2Ids.Count);
+            }
+
             if (modelVerts.Count > 0)
             {
                 _logger.LogInformation(
@@ -347,67 +400,72 @@ public sealed class MmapExtractorService
             }
         }
 
-        // Add GameObject spawns for this map/tile
+        // Add GameObject spawns using the real model collision mesh, same intent as old MaNGOS loadGameObjects().
         if (_goSpawns.Length > 0)
         {
-            float tileMinX = centerX * WowConstants.TileSize - WowConstants.MapHalfSize;
-            float tileMaxX = tileMinX + WowConstants.TileSize;
-            float tileMinZ = centerY * WowConstants.TileSize - WowConstants.MapHalfSize;
-            float tileMaxZ = tileMinZ + WowConstants.TileSize;
+            float wowXMax = (32f - centerY) * WowConstants.TileSize;
+            float wowXMin = (32f - centerY - 1f) * WowConstants.TileSize;
+            float wowYMax = (32f - centerX) * WowConstants.TileSize;
+            float wowYMin = (32f - centerX - 1f) * WowConstants.TileSize;
+
+            wowXMin -= WowConstants.TileSize;
+            wowXMax += WowConstants.TileSize;
+            wowYMin -= WowConstants.TileSize;
+            wowYMax += WowConstants.TileSize;
 
             var goVerts = new List<float>();
             var goIndices = new List<int>();
             var goAreas = new List<byte>();
-            int goMatchCount = 0;
+            int goCandidateCount = 0;
+            int goRasterizedCount = 0;
+            int skippedMissingModel = 0;
+            int skippedLoadFail = 0;
+            int skippedTooSmall = 0;
 
             foreach (var go in _goSpawns)
             {
                 if (go.MapId != mapId)
                     continue;
-                if (go.PosX < tileMinX || go.PosX > tileMaxX
-                    || go.PosZ < tileMinZ || go.PosZ > tileMaxZ)
+                if (go.PosX < wowXMin || go.PosX > wowXMax
+                    || go.PosY < wowYMin || go.PosY > wowYMax)
                     continue;
 
-                goMatchCount++;
+                goCandidateCount++;
 
-                float hs = 0.5f * go.Scale;
-                float ht = 2.0f * go.Scale;
-                float x0 = -(go.PosX + hs), x1 = -(go.PosX - hs);
-                float y0 = go.PosY, y1 = go.PosY + ht;
-                float z0 = -(go.PosZ + hs), z1 = -(go.PosZ - hs);
+                if (!_gameObjectModels.TryGetValue(go.DisplayId, out var modelRef))
+                {
+                    skippedMissingModel++;
+                    continue;
+                }
 
-                int baseIdx = goVerts.Count / 3;
+                var modelData = _gameObjectModelCache.GetOrAdd(go.DisplayId, static (displayId, state) =>
+                    state!.Owner.LoadGameObjectModel(state.Models[displayId]),
+                    (Owner: this, Models: _gameObjectModels));
 
-                goVerts.Add(x0); goVerts.Add(y0); goVerts.Add(z0);
-                goVerts.Add(x1); goVerts.Add(y0); goVerts.Add(z0);
-                goVerts.Add(x1); goVerts.Add(y0); goVerts.Add(z1);
-                goVerts.Add(x0); goVerts.Add(y0); goVerts.Add(z1);
-                goVerts.Add(x0); goVerts.Add(y1); goVerts.Add(z0);
-                goVerts.Add(x1); goVerts.Add(y1); goVerts.Add(z0);
-                goVerts.Add(x1); goVerts.Add(y1); goVerts.Add(z1);
-                goVerts.Add(x0); goVerts.Add(y1); goVerts.Add(z1);
+                if (modelData == null)
+                {
+                    skippedLoadFail++;
+                    continue;
+                }
 
-                goIndices.Add(baseIdx + 4); goIndices.Add(baseIdx + 5); goIndices.Add(baseIdx + 6);
-                goIndices.Add(baseIdx + 4); goIndices.Add(baseIdx + 6); goIndices.Add(baseIdx + 7);
-                goIndices.Add(baseIdx + 1); goIndices.Add(baseIdx + 0); goIndices.Add(baseIdx + 3);
-                goIndices.Add(baseIdx + 1); goIndices.Add(baseIdx + 3); goIndices.Add(baseIdx + 2);
-                goIndices.Add(baseIdx + 1); goIndices.Add(baseIdx + 5); goIndices.Add(baseIdx + 6);
-                goIndices.Add(baseIdx + 1); goIndices.Add(baseIdx + 6); goIndices.Add(baseIdx + 2);
-                goIndices.Add(baseIdx + 0); goIndices.Add(baseIdx + 4); goIndices.Add(baseIdx + 7);
-                goIndices.Add(baseIdx + 0); goIndices.Add(baseIdx + 7); goIndices.Add(baseIdx + 3);
-                goIndices.Add(baseIdx + 3); goIndices.Add(baseIdx + 7); goIndices.Add(baseIdx + 6);
-                goIndices.Add(baseIdx + 3); goIndices.Add(baseIdx + 6); goIndices.Add(baseIdx + 2);
-                goIndices.Add(baseIdx + 0); goIndices.Add(baseIdx + 1); goIndices.Add(baseIdx + 5);
-                goIndices.Add(baseIdx + 0); goIndices.Add(baseIdx + 5); goIndices.Add(baseIdx + 4);
+                Vector3 extent = modelData.BoundsMax - modelData.BoundsMin;
+                float maxExtent = MathF.Max(MathF.Abs(extent.X), MathF.Max(MathF.Abs(extent.Y), MathF.Abs(extent.Z))) * go.Scale;
+                if (maxExtent < 0.1f)
+                {
+                    skippedTooSmall++;
+                    continue;
+                }
 
-                for (int i = 0; i < 12; i++) goAreas.Add(0);
+                AppendGameObjectGeometry(go, modelData, goVerts, goIndices, goAreas);
+                goRasterizedCount++;
             }
 
-            if (goMatchCount > 0)
+            if (goCandidateCount > 0)
             {
-                _logger.LogInformation("[Mmap] ADT ({CX},{CY}): {GOCount} GameObjects in tile " +
-                    "(tileBounds X=[{MinX:F1},{MaxX:F1}] Z=[{MinZ:F1},{MaxZ:F1}])",
-                    centerX, centerY, goMatchCount, tileMinX, tileMaxX, tileMinZ, tileMaxZ);
+                _logger.LogInformation("[Mmap] ADT ({CX},{CY}): GO candidates={Candidates} rasterized={Rasterized} " +
+                    "skippedMissingModel={Missing} skippedTooSmall={TooSmall} skippedLoadFail={LoadFail}",
+                    centerX, centerY, goCandidateCount, goRasterizedCount,
+                    skippedMissingModel, skippedTooSmall, skippedLoadFail);
             }
 
             if (goVerts.Count > 0)
@@ -538,15 +596,37 @@ public sealed class MmapExtractorService
     }
 
     private byte[]?[] BuildNavMeshSubTilesSync(
-        TileGeometry geo, int adtX, int adtY, int maxAdtX, int maxAdtY,
-        float adtMinX, float adtMinZ)
+        uint mapId, TileGeometry geo, int adtX, int adtY, int maxAdtX, int maxAdtY,
+        float adtMinX, float adtMinZ, CancellationToken ct = default)
     {
+        // Filter offmesh connections for this ADT tile once — same as C++ loadOffMeshConnections(mapID, tileX, tileY)
+        var tileConns = _offMeshConnections
+            .Where(c => c.MapId == (int)mapId && c.TileX == adtX && c.TileY == adtY)
+            .ToArray();
+
+        float[] omVerts  = tileConns.Length > 0 ? new float[tileConns.Length * 6]  : Array.Empty<float>();
+        float[] omRads   = tileConns.Length > 0 ? new float[tileConns.Length]       : Array.Empty<float>();
+        byte[]  omDirs   = tileConns.Length > 0 ? new byte[tileConns.Length]        : Array.Empty<byte>();
+        byte[]  omAreas  = tileConns.Length > 0 ? new byte[tileConns.Length]        : Array.Empty<byte>();
+        ushort[] omFlags = tileConns.Length > 0 ? new ushort[tileConns.Length]      : Array.Empty<ushort>();
+        for (int k = 0; k < tileConns.Length; k++)
+        {
+            var c = tileConns[k];
+            omVerts[k * 6 + 0] = c.V0X; omVerts[k * 6 + 1] = c.V0Y; omVerts[k * 6 + 2] = c.V0Z;
+            omVerts[k * 6 + 3] = c.V1X; omVerts[k * 6 + 4] = c.V1Y; omVerts[k * 6 + 5] = c.V1Z;
+            omRads[k]   = c.Radius;
+            omDirs[k]   = c.Direction;
+            omAreas[k]  = c.Area;
+            omFlags[k]  = c.Flags;
+        }
+
         var navData = new byte[]?[WowConstants.SubTilesPerAdtSide * WowConstants.SubTilesPerAdtSide];
 
         for (int subY = 0; subY < WowConstants.SubTilesPerAdtSide; subY++)
         {
             for (int subX = 0; subX < WowConstants.SubTilesPerAdtSide; subX++)
             {
+                ct.ThrowIfCancellationRequested();
                 int slot = subY * WowConstants.SubTilesPerAdtSide + subX;
                 float minX = adtMinX + subX * WowConstants.SubTileSize;
                 float maxX = minX + WowConstants.SubTileSize;
@@ -558,7 +638,8 @@ public sealed class MmapExtractorService
 
                 navData[slot] = BuildNavMeshTileSync(
                     geo, detourTileX, detourTileY,
-                    minX, minZ, maxX, maxZ);
+                    minX, minZ, maxX, maxZ,
+                    omVerts, omRads, omDirs, omAreas, omFlags);
             }
         }
 
@@ -567,7 +648,8 @@ public sealed class MmapExtractorService
 
     private unsafe byte[]? BuildNavMeshTileSync(
         TileGeometry geo, int adtX, int adtY,
-        float minX, float minZ, float maxX, float maxZ)
+        float minX, float minZ, float maxX, float maxZ,
+        float[] omVerts, float[] omRads, byte[] omDirs, byte[] omAreas, ushort[] omFlags)
     {
         int vertCount = geo.VertexCount;
         int triCount = geo.IndexCount / 3;
@@ -585,8 +667,18 @@ public sealed class MmapExtractorService
             MaxSimplificationError = 1.3f,
             TileX = adtX,
             TileY = adtY,
-            MaxVertsPerPoly = 6
+            MaxVertsPerPoly = 6,
+            BorderSize = _recastConfig.WalkableRadius + 3
         };
+
+        // Expand the bounding box by BorderSize * CellSize on each XZ side so that
+        // neighboring geometry is rasterized — this ensures polygon edges reach the
+        // tile boundary and Detour can form portal links between adjacent sub-tiles.
+        float borderMeters = p.BorderSize * _recastConfig.CellSize;
+        float expandedMinX = minX - borderMeters;
+        float expandedMaxX = maxX + borderMeters;
+        float expandedMinZ = minZ - borderMeters;
+        float expandedMaxZ = maxZ + borderMeters;
 
         float minY = float.MaxValue, maxYh = float.MinValue;
         for (int v = 1; v < geo.Vertices.Length; v += 3)
@@ -599,48 +691,57 @@ public sealed class MmapExtractorService
         fixed (float* v = geo.Vertices)
         fixed (int* i = geo.Indices)
         fixed (byte* a = geo.Areas)
+        fixed (float* pOmVerts = omVerts.Length > 0 ? omVerts : new float[6])
+        fixed (float* pOmRads  = omRads.Length  > 0 ? omRads  : new float[1])
+        fixed (byte*  pOmDirs  = omDirs.Length  > 0 ? omDirs  : new byte[1])
+        fixed (byte*  pOmAreas = omAreas.Length > 0 ? omAreas : new byte[1])
+        fixed (ushort* pOmFlags = omFlags.Length > 0 ? omFlags : new ushort[1])
         {
-            p.BoundingBoxMinX = minX;
+            p.BoundingBoxMinX = expandedMinX;
             p.BoundingBoxMinY = minY - 2f;
-            p.BoundingBoxMinZ = minZ;
-            p.BoundingBoxMaxX = maxX;
+            p.BoundingBoxMinZ = expandedMinZ;
+            p.BoundingBoxMaxX = expandedMaxX;
             p.BoundingBoxMaxY = maxYh + 2f;
-            p.BoundingBoxMaxZ = maxZ;
+            p.BoundingBoxMaxZ = expandedMaxZ;
 
             _logger.LogDebug("[Mmap] RecastBuildParams: adt=({AX},{AY}) " +
                 "bbox=[{MinX:F2},{MinY:F2},{MinZ:F2}]→[{MaxX:F2},{MaxY:F2},{MaxZ:F2}] " +
-                "cellSize={CS:F6} cellHeight={CH:F3} input: {Verts} verts {Tris} tris",
+                "cellSize={CS:F6} cellHeight={CH:F3} input: {Verts} verts {Tris} tris {OmCount} offmesh",
                 adtX, adtY,
                 p.BoundingBoxMinX, p.BoundingBoxMinY, p.BoundingBoxMinZ,
                 p.BoundingBoxMaxX, p.BoundingBoxMaxY, p.BoundingBoxMaxZ,
-                p.CellSize, p.CellHeight, vertCount, triCount);
+                p.CellSize, p.CellHeight, vertCount, triCount, omVerts.Length / 6);
 
             byte* outData;
             int outSize;
+            int omCount = omVerts.Length / 6;
 
-            lock (NativeBuildLock)
+            if (!RecastNative.BuildTile(&p, v, vertCount, i, triCount, a,
+                omCount > 0 ? pOmVerts : null,
+                omCount > 0 ? pOmRads  : null,
+                omCount > 0 ? pOmDirs  : null,
+                omCount > 0 ? pOmAreas : null,
+                omCount > 0 ? pOmFlags : null,
+                omCount, &outData, &outSize))
             {
-                if (!RecastNative.BuildTile(&p, v, vertCount, i, triCount, a, &outData, &outSize))
-                {
-                    _logger.LogWarning("[Mmap] BuildTile FAILED for adt=({AX},{AY})", adtX, adtY);
-                    return null;
-                }
-
-                if (outData == null || outSize <= 0)
-                {
-                    _logger.LogWarning("[Mmap] BuildTile returned empty for adt=({AX},{AY})", adtX, adtY);
-                    return null;
-                }
-
-                var result = new byte[outSize];
-                fixed (byte* dest = result)
-                {
-                    Buffer.MemoryCopy(outData, dest, outSize, outSize);
-                }
-
-                RecastNative.FreeBuffer(outData);
-                return result;
+                _logger.LogWarning("[Mmap] BuildTile FAILED for adt=({AX},{AY})", adtX, adtY);
+                return null;
             }
+
+            if (outData == null || outSize <= 0)
+            {
+                _logger.LogWarning("[Mmap] BuildTile returned empty for adt=({AX},{AY})", adtX, adtY);
+                return null;
+            }
+
+            var result = new byte[outSize];
+            fixed (byte* dest = result)
+            {
+                Buffer.MemoryCopy(outData, dest, outSize, outSize);
+            }
+
+            RecastNative.FreeBuffer(outData);
+            return result;
         }
     }
 
@@ -775,7 +876,8 @@ public sealed class MmapExtractorService
                         continue;
                     var v = grp.Vertices[vi];
                     vertRemap[vi] = outVerts.Count / 3;
-                    AppendTransformedVertex(v.X, v.Y, v.Z, rotMatrix, 1.0f, posX, posY, posZ, outVerts);
+                    // fixCoords(v) = (v.Z, v.X, v.Y) — mirrors VMap extractor's fixCoords before mmap generator reads it
+                    AppendTransformedVertex(v.Z, v.X, v.Y, rotMatrix, 1.0f, posX, posY, posZ, outVerts);
                 }
 
                 // Add triangles (no winding flip for WMO — isM2=false in original)
@@ -853,6 +955,8 @@ public sealed class MmapExtractorService
                 float vx = mverts[i * 3 + 0];
                 float vy = mverts[i * 3 + 1];
                 float vz = mverts[i * 3 + 2];
+                // M2 is Z-up: pass raw vertices — no fixCoords needed (mirrors original VMap pipeline
+                // where M2 vertices are written raw and TerrainBuilder rotates them directly)
                 AppendTransformedVertex(vx, vy, vz, rotMatrix, scale, posX, posY, posZ, outVerts);
             }
 
@@ -892,6 +996,213 @@ public sealed class MmapExtractorService
         outVerts.Add(v.Z); // Recast Y (height)
         outVerts.Add(v.X); // Recast Z
     }
+
+    private GameObjectModelData? LoadGameObjectModel(GameObjectModelRef modelRef)
+    {
+        if (modelRef.IsWmo)
+            return LoadGameObjectWmo(modelRef.Path);
+
+        return LoadGameObjectM2(modelRef.Path);
+    }
+
+    private GameObjectModelData? LoadGameObjectM2(string modelPath)
+    {
+        if (!_m2Parser.TryParseBoundingMesh(modelPath, out float[] vertices, out ushort[] indices)
+            || vertices.Length == 0 || indices.Length == 0)
+            return null;
+
+        // M2 is Z-up: keep raw vertices — same as AppendM2Geometry, no fixCoords needed
+        Vector3 boundsMin = new(float.MaxValue, float.MaxValue, float.MaxValue);
+        Vector3 boundsMax = new(float.MinValue, float.MinValue, float.MinValue);
+        for (int i = 0; i < vertices.Length; i += 3)
+        {
+            float x = vertices[i + 0];
+            float y = vertices[i + 1];
+            float z = vertices[i + 2];
+            boundsMin.X = MathF.Min(boundsMin.X, x);
+            boundsMin.Y = MathF.Min(boundsMin.Y, y);
+            boundsMin.Z = MathF.Min(boundsMin.Z, z);
+            boundsMax.X = MathF.Max(boundsMax.X, x);
+            boundsMax.Y = MathF.Max(boundsMax.Y, y);
+            boundsMax.Z = MathF.Max(boundsMax.Z, z);
+        }
+
+        return new GameObjectModelData(
+            modelPath,
+            IsM2: true,
+            vertices,
+            Array.ConvertAll(indices, static x => (int)x),
+            boundsMin,
+            boundsMax);
+    }
+
+    private GameObjectModelData? LoadGameObjectWmo(string modelPath)
+    {
+        var rootResult = _wmoParser.ParseRootAsync(modelPath).GetAwaiter().GetResult();
+        if (!rootResult.Success || rootResult.Root == null)
+            return null;
+
+        var vertices = new List<float>();
+        var indices = new List<int>();
+
+        for (uint groupIdx = 0; groupIdx < rootResult.Root.Header.GroupCount; groupIdx++)
+        {
+            string groupPath = modelPath.Replace(".wmo", $"{groupIdx:D3}.wmo");
+            var group = _wmoParser.ParseGroupAsync(groupPath, (int)groupIdx, modelPath).GetAwaiter().GetResult();
+            if (group == null || group.Vertices.Length == 0 || group.Triangles.Length == 0)
+                continue;
+
+            var validTris = new List<int>(group.Triangles.Length);
+            for (int t = 0; t < group.Triangles.Length; t++)
+            {
+                WmoMaterialFlag flags = t < group.Materials.Length
+                    ? group.Materials[t].Flags
+                    : WmoMaterialFlag.CollideHit;
+
+                bool noCollision = (flags & WmoMaterialFlag.NoCollision) != 0;
+                bool hasCollision = (flags & (WmoMaterialFlag.Hint | WmoMaterialFlag.CollideHit)) != 0;
+                if (noCollision || !hasCollision)
+                    continue;
+
+                validTris.Add(t);
+            }
+
+            if (validTris.Count == 0)
+                continue;
+
+            var usedVerts = new HashSet<ushort>(validTris.Count * 3);
+            foreach (int triIndex in validTris)
+            {
+                var tri = group.Triangles[triIndex];
+                usedVerts.Add(tri.I0);
+                usedVerts.Add(tri.I1);
+                usedVerts.Add(tri.I2);
+            }
+
+            var remap = new Dictionary<ushort, int>(usedVerts.Count);
+            foreach (ushort vertIndex in usedVerts)
+            {
+                if (vertIndex >= group.Vertices.Length)
+                    continue;
+
+                var vertex = group.Vertices[vertIndex];
+                remap[vertIndex] = vertices.Count / 3;
+                // fixCoords(v) = (v.Z, v.X, v.Y) in the old VMAP pipeline before transform()
+                vertices.Add(vertex.Z);
+                vertices.Add(vertex.X);
+                vertices.Add(vertex.Y);
+            }
+
+            foreach (int triIndex in validTris)
+            {
+                var tri = group.Triangles[triIndex];
+                if (!remap.TryGetValue(tri.I0, out int r0)
+                    || !remap.TryGetValue(tri.I1, out int r1)
+                    || !remap.TryGetValue(tri.I2, out int r2))
+                    continue;
+
+                indices.Add(r0);
+                indices.Add(r1);
+                indices.Add(r2);
+            }
+        }
+
+        if (vertices.Count == 0 || indices.Count == 0)
+            return null;
+
+        Vector3 boundsMin = new(
+            rootResult.Root.Header.BoundingBoxMin.X,
+            rootResult.Root.Header.BoundingBoxMin.Y,
+            rootResult.Root.Header.BoundingBoxMin.Z);
+        Vector3 boundsMax = new(
+            rootResult.Root.Header.BoundingBoxMax.X,
+            rootResult.Root.Header.BoundingBoxMax.Y,
+            rootResult.Root.Header.BoundingBoxMax.Z);
+
+        return new GameObjectModelData(modelPath, IsM2: false, vertices.ToArray(), indices.ToArray(), boundsMin, boundsMax);
+    }
+
+    private static void AppendGameObjectGeometry(
+        GoSpawn spawn,
+        GameObjectModelData modelData,
+        List<float> outVerts,
+        List<int> outIndices,
+        List<byte> outAreas)
+    {
+        Quaternion quat = new(spawn.Rot0, spawn.Rot1, spawn.Rot2, spawn.Rot3);
+        var rotation = Matrix4x4.Transpose(Matrix4x4.CreateFromQuaternion(quat));
+
+        // position = (pos[0]-32G, pos[1]-32G, pos[2]) — mirrors TerrainBuilder::loadGameObjects
+        float posX = spawn.PosX - 32f * WowConstants.TileSize;
+        float posY = spawn.PosY - 32f * WowConstants.TileSize;
+        float posZ = spawn.PosZ;
+        int baseIndex = outVerts.Count / 3;
+
+        for (int i = 0; i < modelData.Vertices.Length; i += 3)
+        {
+            float vx = modelData.Vertices[i + 0];
+            float vy = modelData.Vertices[i + 1];
+            float vz = modelData.Vertices[i + 2];
+            AppendTransformedVertex(vx, vy, vz, rotation, spawn.Scale, posX, posY, posZ, outVerts);
+        }
+
+        for (int i = 0; i < modelData.Indices.Length; i += 3)
+        {
+            outIndices.Add(baseIndex + modelData.Indices[i + 0]);
+            outIndices.Add(baseIndex + modelData.Indices[i + 1]);
+            outIndices.Add(baseIndex + modelData.Indices[i + 2]);
+
+            outAreas.Add(1);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // OffMesh connections: ported from TerrainBuilder::loadOffMeshConnections
+    // Format: mapId tx,ty (x y z) (x y z) size [areaType] [direction]
+    // Verts stored as (p0[1], p0[2], p0[0]) per C++ convention (same as solidVerts space).
+    // -----------------------------------------------------------------------
+    private static readonly Regex OffMeshLineRegex = new(
+        @"^(\d+)\s+(-?\d+),(-?\d+)\s+\((-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+\((-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+([\d.]+)(?:\s+(\d+))?(?:\s+(\d+))?",
+        RegexOptions.Compiled);
+
+    private static OffMeshConnection[] LoadOffMeshConnections(string path)
+    {
+        var result = new List<OffMeshConnection>();
+        foreach (string line in File.ReadLines(path))
+        {
+            string trimmed = line.TrimStart();
+            if (trimmed.Length == 0 || trimmed[0] == '#' || trimmed[0] == '/')
+                continue;
+
+            var m = OffMeshLineRegex.Match(trimmed);
+            if (!m.Success)
+                continue;
+
+            int mid  = int.Parse(m.Groups[1].Value,  CultureInfo.InvariantCulture);
+            int tx   = int.Parse(m.Groups[2].Value,  CultureInfo.InvariantCulture);
+            int ty   = int.Parse(m.Groups[3].Value,  CultureInfo.InvariantCulture);
+            float p0x = float.Parse(m.Groups[4].Value, CultureInfo.InvariantCulture);
+            float p0y = float.Parse(m.Groups[5].Value, CultureInfo.InvariantCulture);
+            float p0z = float.Parse(m.Groups[6].Value, CultureInfo.InvariantCulture);
+            float p1x = float.Parse(m.Groups[7].Value, CultureInfo.InvariantCulture);
+            float p1y = float.Parse(m.Groups[8].Value, CultureInfo.InvariantCulture);
+            float p1z = float.Parse(m.Groups[9].Value, CultureInfo.InvariantCulture);
+            float size      = float.Parse(m.Groups[10].Value, CultureInfo.InvariantCulture);
+            int areaType  = m.Groups[11].Success ? int.Parse(m.Groups[11].Value, CultureInfo.InvariantCulture) : 1;
+            int direction = m.Groups[12].Success ? int.Parse(m.Groups[12].Value, CultureInfo.InvariantCulture) : 1;
+
+            // Store in Recast/solidVerts space: C++ does append(p0[1], p0[2], p0[0])
+            result.Add(new OffMeshConnection(
+                mid, tx, ty,
+                p0y, p0z, p0x,   // start: (p0[1], p0[2], p0[0])
+                p1y, p1z, p1x,   // end:   (p1[1], p1[2], p1[0])
+                size,
+                (byte)direction,
+                (byte)areaType,
+                0x2F));           // flags: traversable by all non-transport queries
+        }
+        return result.ToArray();
+    }
 }
 
 public readonly struct TileGeometry
@@ -909,3 +1220,28 @@ public readonly struct TileGeometry
         Areas = areas;
     }
 }
+
+// Parsed entry from the offmesh.txt connection file.
+// Verts are pre-transformed to Recast/solidVerts space (p0[1], p0[2], p0[0]) per C++ convention.
+internal readonly record struct OffMeshConnection(
+    int MapId,
+    int TileX,
+    int TileY,
+    float V0X, float V0Y, float V0Z,   // start point
+    float V1X, float V1Y, float V1Z,   // end point
+    float Radius,
+    byte Direction,                     // 0=one-way, 1=bidirectional
+    byte Area,
+    ushort Flags);
+
+internal readonly record struct GameObjectModelRef(
+    string Path,
+    bool IsWmo);
+
+internal sealed record GameObjectModelData(
+    string Path,
+    bool IsM2,
+    float[] Vertices,
+    int[] Indices,
+    Vector3 BoundsMin,
+    Vector3 BoundsMax);

@@ -32,6 +32,7 @@ struct RecastBuildParams
     float MaxSimplificationError;
 
     int   MaxVertsPerPoly;
+    int   BorderSize;  // cells; expand bbox by BorderSize*cs on each XZ side, pass to rcBuildRegions
 };
 
 extern "C"
@@ -50,4 +51,21 @@ extern "C"
         uint8_t** outData, int* outSize);
 
     RECAST_API void FreeBuffer(void* ptr);
+
+    // Loads an mmtile (mmapVer=5 format), builds a dtNavMesh from all sub-tiles, and runs a
+    // findStraightPath between start and end.  Returns the number of straight-path points written
+    // to outPath (x,y,z per point), or a negative error code:
+    //  -1  bad input
+    //  -2  mmtile too small
+    //  -3  dtAllocNavMesh failed
+    //  -4  dtNavMesh::init failed
+    //  -5  dtAllocNavMeshQuery failed
+    //  -6  dtNavMeshQuery::init failed
+    //  -7  no poly found near start or end
+    //  -8  findPath failed or returned empty path
+    RECAST_API int TestPathfinding(
+        const uint8_t* mmtileData, int mmtileSize,
+        float startX, float startY, float startZ,
+        float endX,   float endY,   float endZ,
+        float* outPath, int maxPathPts);
 }

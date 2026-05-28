@@ -555,13 +555,13 @@ public sealed class AdtParser
             NSndEmitters   = reader.ReadUInt32(), // 0x58
             OfsLiquid      = reader.ReadUInt32(), // 0x5C
             SizeLiquid     = reader.ReadUInt32(), // 0x60
-            Zpos           = reader.ReadFloat(),  // 0x64  world X
-            Xpos           = reader.ReadFloat(),  // 0x68  world Z
-            Ypos           = reader.ReadFloat(),  // 0x6C  world Y = height base
-            OfsMCCV        = reader.ReadUInt32(), // 0x70
-            Unused1        = reader.ReadUInt32(), // 0x74
-            Unused2        = reader.ReadUInt32(), // 0x78
-            Unused3        = reader.ReadUInt32(), // 0x7C  (pads to 128 bytes total)
+            PredTex        = reader.ReadUInt32(), // 0x64
+            Zpos           = reader.ReadFloat(),  // 0x68  position.x in file layout
+            Xpos           = reader.ReadFloat(),  // 0x6C  position.y in file layout
+            Ypos           = reader.ReadFloat(),  // 0x70  position.z = height base
+            OfsMCCV        = reader.ReadUInt32(), // 0x74
+            Unused1        = reader.ReadUInt32(), // 0x78
+            Unused2        = reader.ReadUInt32(), // 0x7C
         };
 
         float[] heights = new float[AdtMcvt.TotalVertices];

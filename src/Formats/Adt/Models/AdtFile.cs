@@ -249,7 +249,7 @@ public sealed class AdtFile
 
         ref readonly var liquid = ref GetLiquidData(chunkIndex);
         if (liquid.HasLiquid)
-            return liquid.PrimaryType == LiquidType.Magma ? (byte)3 : (byte)2; // NAV_LAVA : NAV_WATER
+            return liquid.PrimaryType is LiquidType.Magma or LiquidType.Slime ? (byte)3 : (byte)2; // NAV_LAVA : NAV_WATER
         uint texId = _chunkTextureIds[chunkIndex];
         if (texId < TextureNames.Length && IsRoadTexture(TextureNames[(int)texId]))
             return 4; // NAV_ROAD
