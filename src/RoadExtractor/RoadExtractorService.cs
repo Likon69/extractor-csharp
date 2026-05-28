@@ -42,7 +42,9 @@ public sealed class RoadExtractorService
         uint mapId,
         string mapName,
         IProgress<TileProgressEvent>? progress,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        int? onlyTileX = null,
+        int? onlyTileY = null)
     {
         _logger.LogInformation("[Road] Starting road extraction for {MapName} (id={MapId})", mapName, mapId);
 
@@ -53,6 +55,8 @@ public sealed class RoadExtractorService
         }
 
         var tiles = _wdtReader.GetExistingTiles();
+        if (onlyTileX.HasValue && onlyTileY.HasValue)
+            tiles = tiles.Where(t => t.X == onlyTileX.Value && t.Y == onlyTileY.Value).ToList();
         _logger.LogInformation("[Road] Found {Count} ADT tiles for {MapName}", tiles.Count, mapName);
 
         int successCount = 0, failCount = 0;

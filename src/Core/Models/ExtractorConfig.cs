@@ -31,8 +31,30 @@ public sealed class ExtractorConfig
     [JsonPropertyName("BigBaseUnit")]
     public bool BigBaseUnit { get; init; }
 
+    [JsonPropertyName("SingleTileEnabled")]
+    public bool SingleTileEnabled { get; init; }
+
+    [JsonPropertyName("SingleTileX")]
+    public int SingleTileX { get; init; }
+
+    [JsonPropertyName("SingleTileY")]
+    public int SingleTileY { get; init; }
+
     [JsonPropertyName("RecastConfig")]
     public RecastConfig? RecastConfig { get; init; }
+
+    // Window geometry — NaN means "use default"
+    [JsonPropertyName("WindowLeft")]
+    public double WindowLeft { get; init; } = double.NaN;
+
+    [JsonPropertyName("WindowTop")]
+    public double WindowTop { get; init; } = double.NaN;
+
+    [JsonPropertyName("WindowWidth")]
+    public double WindowWidth { get; init; } = 1000;
+
+    [JsonPropertyName("WindowHeight")]
+    public double WindowHeight { get; init; } = 700;
 }
 
 public readonly struct RecastConfig

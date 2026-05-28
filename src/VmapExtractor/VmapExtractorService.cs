@@ -41,7 +41,9 @@ public sealed class VmapExtractorService
         uint mapId,
         string mapName,
         IProgress<TileProgressEvent>? progress,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        int? onlyTileX = null,
+        int? onlyTileY = null)
     {
         _logger.LogInformation("[Vmap] Starting vmap extraction for {MapName} (id={MapId})", mapName, mapId);
 
@@ -52,6 +54,8 @@ public sealed class VmapExtractorService
         }
 
         var tiles = _wdtReader.GetExistingTiles();
+        if (onlyTileX.HasValue && onlyTileY.HasValue)
+            tiles = tiles.Where(t => t.X == onlyTileX.Value && t.Y == onlyTileY.Value).ToList();
         _logger.LogInformation("[Vmap] Found {Count} ADT tiles for {MapName}", tiles.Count, mapName);
 
         int successCount = 0, failCount = 0;

@@ -1,4 +1,6 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -9,181 +11,241 @@ namespace MaNGOS.Extractor.UI.ViewModels;
 
 /// <summary>
 /// Manages the 64×64 tile grid display and tile state updates.
+/// Bitmap is 640×640 (10 px per tile, with 1-px separator border).
 /// Thread-safe — dispatches all UI updates to the UI thread.
 /// </summary>
-public sealed class TileGridViewModel
+public sealed class TileGridViewModel : INotifyPropertyChanged
 {
+    public event PropertyChangedEventHandler? PropertyChanged;
+
     private readonly WriteableBitmap _bitmap;
-    private readonly Dispatcher _dispatcher;
-    private readonly bool[] _tileExists;
-    private readonly TileStatus[] _tileStatus;
-    private readonly object _lock = new();
+    private readonly Dispatcher      _dispatcher;
+    private readonly bool[]          _tileExists; // tiles known from WDT
+    private readonly bool[]          _tileDone;   // deduplicate done-count across phases
+    private readonly uint[]          _tileColor;  // current render color per tile
+    private readonly object          _lock = new();
 
-    public const int GridSize = WowConstants.GridSize; // 64
+    private int _doneTiles;
+    private int _pendingTiles;
 
-    // Couleurs ARGB
-    private const uint ColorNone = 0xFF2D2D2D;    // Tile n'existe pas
-    private const uint ColorPending = 0xFF4A4A6A; // En attente
-    private const uint ColorProcessing = 0xFFF0A500; // En cours
-    private const uint ColorDone = 0xFF2ECC71;     // Terminé
-    private const uint ColorFailed = 0xFFE74C3C;   // Erreur
+    public const int GridSize    = WowConstants.GridSize; // 64
+    private const int CellSize   = 10;                    // px per tile cell
+    private const int BitmapSize = GridSize * CellSize;   // 640
 
-    /// <summary>Bitmap for rendering — lock before writing.</summary>
-    public WriteableBitmap Bitmap => _bitmap;
+    // ── Palette ─────────────────────────────────────────────────────────────
+    private const uint ColorEmpty      = 0xFF0A0E14; // void / no tile
+    private const uint ColorBorder     = 0xFF060A0F; // 1-px cell separator
+    private const uint ColorPending    = 0xFF1B2A3B; // fog of war (known, not yet built)
+    private const uint ColorProcessing = 0xFFCC8800; // amber — building
+    private const uint ColorFailed     = 0xFFD62F2F; // red   — error
 
-    /// <summary>Collection of map IDs to display.</summary>
+    // Done colours, one per phase
+    private const uint ColorDoneMap    = 0xFF1768AC; // blue
+    private const uint ColorDoneVmap   = 0xFF6A1FB5; // purple
+    private const uint ColorDoneRoad   = 0xFFB8960C; // gold
+    private const uint ColorDoneMmap   = 0xFF1A7F37; // green  ← mmap = most visible
+
+    public WriteableBitmap Bitmap      => _bitmap;
+    public int             SelectedMapId { get; set; }
+
     public ObservableCollection<MapListItem> Maps { get; } = new();
 
-    /// <summary>Currently selected map ID.</summary>
-    public int SelectedMapId { get; set; }
+    private string _currentMapLabel = "— No map loaded —";
+    public string CurrentMapLabel
+    {
+        get => _currentMapLabel;
+        private set { _currentMapLabel = value; OnPropertyChanged(); }
+    }
 
-    /// <summary>Creates a new tile grid view model.</summary>
+    private string _statsLabel = "";
+    public string StatsLabel
+    {
+        get => _statsLabel;
+        private set { _statsLabel = value; OnPropertyChanged(); }
+    }
+
     public TileGridViewModel()
     {
         _dispatcher = Dispatcher.CurrentDispatcher;
         _tileExists = new bool[GridSize * GridSize];
-        _tileStatus = new TileStatus[GridSize * GridSize];
-        _bitmap = new WriteableBitmap(GridSize, GridSize, 96, 96, PixelFormats.Bgra32, null);
+        _tileDone   = new bool[GridSize * GridSize];
+        _tileColor  = new uint[GridSize * GridSize];
+        _bitmap     = new WriteableBitmap(BitmapSize, BitmapSize, 96, 96, PixelFormats.Bgra32, null);
 
-        // Initialize all tiles as non-existent
-        Array.Fill(_tileStatus, TileStatus.Pending);
-        ClearGrid();
+        Array.Fill(_tileColor, ColorEmpty);
+        RenderFullGrid();
     }
 
-    /// <summary>
-    /// Initializes tiles from WDT data.
-    /// Call this when loading a map.
-    /// </summary>
+    // ── Public API ──────────────────────────────────────────────────────────
+
+    /// <summary>Switch the grid to a new map, clearing all state.</summary>
+    public void SetCurrentMap(int mapId, string name)
+    {
+        lock (_lock)
+        {
+            SelectedMapId = mapId;
+            Array.Clear(_tileExists, 0, _tileExists.Length);
+            Array.Clear(_tileDone,   0, _tileDone.Length);
+            Array.Fill (_tileColor,  ColorEmpty);
+            _doneTiles    = 0;
+            _pendingTiles = 0;
+        }
+        _dispatcher.InvokeAsync(() =>
+        {
+            CurrentMapLabel = $"[{mapId:D3}]  {name}";
+            StatsLabel      = "";
+            RenderFullGrid();
+        });
+    }
+
+    /// <summary>Pre-populate pending tiles from WDT data.</summary>
     public void InitializeTiles(IEnumerable<(int X, int Y)> existingTiles)
     {
         lock (_lock)
         {
-            // Reset all to non-existent
             Array.Clear(_tileExists, 0, _tileExists.Length);
-
-            // Mark existing tiles
+            _pendingTiles = 0;
             foreach (var (x, y) in existingTiles)
             {
                 int idx = y * GridSize + x;
-                if (idx >= 0 && idx < _tileExists.Length)
+                if ((uint)idx < (uint)_tileExists.Length)
                 {
                     _tileExists[idx] = true;
-                    _tileStatus[idx] = TileStatus.Pending;
+                    _tileColor[idx]  = ColorPending;
+                    _pendingTiles++;
                 }
             }
-
-            // Re-render
-            RenderGrid();
         }
+        _dispatcher.InvokeAsync(() => RenderFullGrid());
     }
 
-    /// <summary>
-    /// Handles a tile progress event from extraction services.
-    /// Thread-safe — dispatches to UI thread.
-    /// </summary>
+    /// <summary>Handle a progress event from an extraction service.</summary>
     public void OnTileProgress(TileProgressEvent e)
     {
-        if (e.MapId != SelectedMapId)
-            return;
+        if (e.MapId != SelectedMapId) return;
 
         _dispatcher.InvokeAsync(() =>
         {
+            int idx = e.TileY * GridSize + e.TileX;
+            if ((uint)idx >= (uint)_tileColor.Length) return;
+
+            uint newColor;
             lock (_lock)
             {
-                int idx = e.TileY * GridSize + e.TileX;
-                if (idx < 0 || idx >= _tileStatus.Length)
-                    return;
-
-                uint color = e.Status switch
+                newColor = e.Status switch
                 {
-                    TileStatus.Pending => _tileExists[idx] ? ColorPending : ColorNone,
+                    TileStatus.Pending    => _tileExists[idx] ? ColorPending : ColorEmpty,
                     TileStatus.Processing => ColorProcessing,
-                    TileStatus.Done => ColorDone,
-                    TileStatus.Failed => ColorFailed,
-                    _ => ColorPending
+                    TileStatus.Done       => PhaseColor(e.Phase),
+                    TileStatus.Failed     => ColorFailed,
+                    _                     => ColorEmpty
                 };
 
-                _tileStatus[idx] = e.Status;
-                WritePixel(e.TileX, e.TileY, color);
+                if (e.Status == TileStatus.Done && !_tileDone[idx])
+                {
+                    _tileDone[idx] = true;
+                    _doneTiles++;
+                }
+                _tileColor[idx] = newColor;
             }
+
+            WriteTilePixels(e.TileX, e.TileY, newColor);
+            UpdateStats();
         });
     }
 
-    /// <summary>
-    /// Clears all tiles and resets to pending state.
-    /// </summary>
-    public void ClearGrid()
-    {
-        lock (_lock)
-        {
-            for (int y = 0; y < GridSize; y++)
-            {
-                for (int x = 0; x < GridSize; x++)
-                {
-                    uint color = _tileExists[y * GridSize + x] ? ColorPending : ColorNone;
-                    WritePixel(x, y, color);
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// Resets all tiles to pending state (clears done/failed).
-    /// </summary>
+    /// <summary>Reset all tiles back to pending/empty (called on Stop).</summary>
     public void ResetAllTiles()
     {
         lock (_lock)
         {
-            for (int i = 0; i < _tileStatus.Length; i++)
-            {
-                if (_tileExists[i])
-                    _tileStatus[i] = TileStatus.Pending;
-            }
-            RenderGrid();
+            for (int i = 0; i < _tileColor.Length; i++)
+                _tileColor[i] = _tileExists[i] ? ColorPending : ColorEmpty;
+            Array.Clear(_tileDone, 0, _tileDone.Length);
+            _doneTiles = 0;
         }
-    }
-
-    private void WritePixel(int x, int y, uint color)
-    {
-        _bitmap.WritePixels(new System.Windows.Int32Rect(x, y, 1, 1), new[] { (int)color }, 4, 0);
-    }
-
-    private void RenderGrid()
-    {
-        var pixels = new int[GridSize * GridSize];
-
-        for (int y = 0; y < GridSize; y++)
+        _dispatcher.InvokeAsync(() =>
         {
-            for (int x = 0; x < GridSize; x++)
-            {
-                int idx = y * GridSize + x;
-                uint color = _tileExists[idx]
-                    ? _tileStatus[idx] switch
-                    {
-                        TileStatus.Pending => ColorPending,
-                        TileStatus.Processing => ColorProcessing,
-                        TileStatus.Done => ColorDone,
-                        TileStatus.Failed => ColorFailed,
-                        _ => ColorPending
-                    }
-                    : ColorNone;
+            RenderFullGrid();
+            StatsLabel = "";
+        });
+    }
 
-                pixels[idx] = (int)color;
+    // ── Private ─────────────────────────────────────────────────────────────
+
+    private static uint PhaseColor(ExtractionPhase phase) => phase switch
+    {
+        ExtractionPhase.Map  => ColorDoneMap,
+        ExtractionPhase.Vmap => ColorDoneVmap,
+        ExtractionPhase.Road => ColorDoneRoad,
+        ExtractionPhase.Mmap => ColorDoneMmap,
+        _                    => ColorDoneMmap
+    };
+
+    private void RenderFullGrid()
+    {
+        var buf = new int[BitmapSize * BitmapSize];
+        lock (_lock)
+        {
+            for (int ty = 0; ty < GridSize; ty++)
+            {
+                for (int tx = 0; tx < GridSize; tx++)
+                {
+                    uint fill = _tileColor[ty * GridSize + tx];
+                    int  px   = tx * CellSize;
+                    int  py   = ty * CellSize;
+
+                    for (int dy = 0; dy < CellSize; dy++)
+                    {
+                        bool lastRow = dy == CellSize - 1;
+                        for (int dx = 0; dx < CellSize; dx++)
+                        {
+                            bool border = lastRow || dx == CellSize - 1;
+                            buf[(py + dy) * BitmapSize + (px + dx)] =
+                                (int)(border ? ColorBorder : fill);
+                        }
+                    }
+                }
             }
         }
-
-        _bitmap.WritePixels(new System.Windows.Int32Rect(0, 0, GridSize, GridSize), pixels, GridSize * 4, 0);
+        _bitmap.WritePixels(new System.Windows.Int32Rect(0, 0, BitmapSize, BitmapSize),
+                            buf, BitmapSize * 4, 0);
     }
+
+    private void WriteTilePixels(int tx, int ty, uint fill)
+    {
+        int px     = tx * CellSize;
+        int py     = ty * CellSize;
+        var pixels = new int[CellSize * CellSize];
+
+        for (int dy = 0; dy < CellSize; dy++)
+        {
+            bool lastRow = dy == CellSize - 1;
+            for (int dx = 0; dx < CellSize; dx++)
+            {
+                bool border = lastRow || dx == CellSize - 1;
+                pixels[dy * CellSize + dx] = (int)(border ? ColorBorder : fill);
+            }
+        }
+        _bitmap.WritePixels(new System.Windows.Int32Rect(px, py, CellSize, CellSize),
+                            pixels, CellSize * 4, 0);
+    }
+
+    private void UpdateStats()
+    {
+        StatsLabel = _pendingTiles > 0
+            ? $"{_doneTiles} / {_pendingTiles}"
+            : _doneTiles > 0 ? $"{_doneTiles} tiles" : "";
+    }
+
+    private void OnPropertyChanged([CallerMemberName] string? name = null)
+        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 }
 
-/// <summary>
-/// Represents a map entry in the list.
-/// </summary>
 public sealed class MapListItem
 {
-    public int Id { get; init; }
-    public string Name { get; init; } = string.Empty;
-    public bool IsSelected { get; set; }
-
+    public int    Id         { get; init; }
+    public string Name       { get; init; } = string.Empty;
+    public bool   IsSelected { get; set; }
     public override string ToString() => $"[{Id}] {Name}";
 }

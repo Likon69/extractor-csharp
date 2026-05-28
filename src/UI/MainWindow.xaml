@@ -89,6 +89,8 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
 
                             <Label Grid.Row="0" Grid.Column="0" Content="CellSize:"/>
@@ -117,6 +119,20 @@
 
                             <Label Grid.Row="8" Grid.Column="0" Content="Climb:"/>
                             <TextBox Grid.Row="8" Grid.Column="1" Text="{Binding WalkableClimb, UpdateSourceTrigger=PropertyChanged}"/>
+
+                            <Label Grid.Row="9" Grid.Column="0" Content="One tile:"/>
+                            <CheckBox Grid.Row="9" Grid.Column="1" IsChecked="{Binding SingleTileEnabled}" VerticalAlignment="Center"/>
+
+                            <Label Grid.Row="10" Grid.Column="0" Content="Tile X/Y:"/>
+                            <Grid Grid.Row="10" Grid.Column="1">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="8"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBox Grid.Column="0" Text="{Binding SingleTileX, UpdateSourceTrigger=PropertyChanged}"/>
+                                <TextBox Grid.Column="2" Text="{Binding SingleTileY, UpdateSourceTrigger=PropertyChanged}"/>
+                            </Grid>
                         </Grid>
 
                         <Separator Margin="0,16"/>

@@ -43,6 +43,15 @@ public static class Program
         var ct = CancellationToken.None;
         int processed = 0;
 
+        if (options.Phases.Contains("vmap", StringComparer.OrdinalIgnoreCase))
+        {
+            string vmapDir = Path.Combine(options.OutputPath, "vmaps");
+            Console.WriteLine("=== Extracting GAMEOBJECT_MODELS ===");
+            var goModelsExtractor = new GameObjectModelsExtractor(archives, _loggerFactory, vmapDir);
+            int extractedModels = await goModelsExtractor.ExtractAsync(ct);
+            Console.WriteLine($"  [Vmap] GAMEOBJECT_MODELS extracted: {extractedModels} models.");
+        }
+
         foreach (var mid in options.MapIds)
         {
             uint mapId = (uint)mid;
@@ -54,7 +63,7 @@ public static class Program
             {
                 string mapDir = Path.Combine(options.OutputPath, "maps");
                 var svc = new MapExtractorService(archives, _loggerFactory, mapDir);
-                int tiles = await svc.ExtractMapAsync(mapId, mapName, progress, ct);
+                int tiles = await svc.ExtractMapAsync(mapId, mapName, progress, ct, options.TileX, options.TileY);
                 Console.WriteLine($"  [Map] {tiles} tiles extracted.");
                 processed += tiles;
             }
@@ -63,7 +72,7 @@ public static class Program
             {
                 string vmapDir = Path.Combine(options.OutputPath, "vmaps");
                 var svc = new VmapExtractorService(archives, _loggerFactory, vmapDir);
-                int tiles = await svc.ExtractMapAsync(mapId, mapName, progress, ct);
+                int tiles = await svc.ExtractMapAsync(mapId, mapName, progress, ct, options.TileX, options.TileY);
                 Console.WriteLine($"  [Vmap] {tiles} tiles extracted.");
             }
 
@@ -71,7 +80,7 @@ public static class Program
             {
                 string roadDir = Path.Combine(options.OutputPath, "roadmaps");
                 var svc = new RoadExtractorService(archives, _loggerFactory, roadDir);
-                int tiles = await svc.ExtractMapAsync(mapId, mapName, progress, ct);
+                int tiles = await svc.ExtractMapAsync(mapId, mapName, progress, ct, options.TileX, options.TileY);
                 Console.WriteLine($"  [Road] {tiles} tiles extracted.");
             }
 
@@ -88,7 +97,7 @@ public static class Program
                 string roadDir = Path.Combine(options.OutputPath, "roadmaps");
                 var svc = new MmapExtractorService(archives, _loggerFactory, mmapDir,
                     recast, options.Threads, options.GoSpawnsPath, offMeshPath: null, roadMapsDir: roadDir);
-                int tiles = await svc.ExtractMapAsync(mapId, mapName, progress, ct);
+                int tiles = await svc.ExtractMapAsync(mapId, mapName, progress, ct, options.TileX, options.TileY);
                 Console.WriteLine($"  [Mmap] {tiles} tiles extracted.");
             }
         }
@@ -131,6 +140,13 @@ public static class Program
                     if (++i >= args.Length) return BadArg("--maps <csv>");
                     opts.MapIds = args[i].Split(',', StringSplitOptions.RemoveEmptyEntries)
                         .Select(int.Parse).ToArray();
+                    break;
+                case "--tile":
+                    if (++i >= args.Length) return BadArg("--tile <x,y>");
+                    var tileParts = args[i].Split(',', StringSplitOptions.RemoveEmptyEntries);
+                    if (tileParts.Length != 2) return BadArg("--tile <x,y>");
+                    opts.TileX = int.Parse(tileParts[0]);
+                    opts.TileY = int.Parse(tileParts[1]);
                     break;
                 case "--threads":
                     if (++i >= args.Length) return BadArg("--threads <n>");
@@ -178,6 +194,7 @@ public static class Program
         Console.WriteLine("  --out <path>        Output directory (required)");
         Console.WriteLine("  --phases <csv>      Comma-separated phases (default: Map,Vmap,Road,Mmap)");
         Console.WriteLine("  --maps <csv>        Comma-separated map IDs (default: 0,1,530,571)");
+        Console.WriteLine("  --tile <x,y>        Extract only one ADT tile, e.g. --tile 35,20");
         Console.WriteLine("  --threads <n>       Max threads (default: 4)");
         Console.WriteLine("  --locale <code>     Locale code (default: enUS)");
         Console.WriteLine("  --gospawns <path>   gameobject_spawns.bin path (default: gameobject_spawns.bin)");
@@ -189,6 +206,8 @@ public static class Program
         public string OutputPath { get; set; } = "";
         public string[] Phases { get; set; } = Array.Empty<string>();
         public int[] MapIds { get; set; } = Array.Empty<int>();
+        public int? TileX { get; set; }
+        public int? TileY { get; set; }
         public int Threads { get; set; } = 4;
         public string Locale { get; set; } = "enUS";
         public string GoSpawnsPath { get; set; } = "gameobject_spawns.bin";

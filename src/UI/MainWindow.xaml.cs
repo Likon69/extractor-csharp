@@ -19,6 +19,13 @@ public partial class MainWindow : Window
     {
         _logTextBox = LogTextBox;
         if (DataContext is ViewModels.MainViewModel vm)
+        {
+            // Restore window position/size saved from previous session.
+            if (!double.IsNaN(vm.WindowLeft))   Left   = vm.WindowLeft;
+            if (!double.IsNaN(vm.WindowTop))    Top    = vm.WindowTop;
+            if (vm.WindowWidth  > 200)          Width  = vm.WindowWidth;
+            if (vm.WindowHeight > 200)          Height = vm.WindowHeight;
+
             vm.LogMessages.CollectionChanged += (_, _) =>
                 Dispatcher.InvokeAsync(() =>
                 {
@@ -29,11 +36,19 @@ public partial class MainWindow : Window
                     _logTextBox.Text = sb.ToString();
                     _logTextBox.ScrollToEnd();
                 });
+        }
     }
 
     private void OnClosed(object? sender, EventArgs e)
     {
         if (DataContext is ViewModels.MainViewModel vm)
+        {
+            // Capture current window geometry before saving.
+            vm.WindowLeft   = Left;
+            vm.WindowTop    = Top;
+            vm.WindowWidth  = Width;
+            vm.WindowHeight = Height;
             vm.SaveConfig();
+        }
     }
 }

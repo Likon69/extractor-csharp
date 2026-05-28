@@ -37,7 +37,9 @@ public sealed class MapExtractorService
         uint mapId,
         string mapName,
         IProgress<TileProgressEvent>? progress,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        int? onlyTileX = null,
+        int? onlyTileY = null)
     {
         _logger.LogInformation("[Map] Starting map extraction for {MapName} (id={MapId})", mapName, mapId);
 
@@ -48,6 +50,8 @@ public sealed class MapExtractorService
         }
 
         var tiles = _wdtReader.GetExistingTiles();
+        if (onlyTileX.HasValue && onlyTileY.HasValue)
+            tiles = tiles.Where(t => t.X == onlyTileX.Value && t.Y == onlyTileY.Value).ToList();
         _logger.LogInformation("[Map] Found {Count} ADT tiles for {MapName}", tiles.Count, mapName);
 
         int successCount = 0, failCount = 0;
