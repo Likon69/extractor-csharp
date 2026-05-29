@@ -451,34 +451,17 @@ public sealed class AdtParser
             return null;
 
         uint size = reader.ReadUInt32();
+        // MFBO real format: two short[3][3] planes (max then min) = 36 bytes total.
+        // Used for flight bounds only — not needed for map extraction.
+        if (size < 36)
+            return null;
 
-        float boxMinX = reader.ReadFloat();
-        float boxMinY = reader.ReadFloat();
-        float boxMinZ = reader.ReadFloat();
-        float boxMaxX = reader.ReadFloat();
-        float boxMaxY = reader.ReadFloat();
-        float boxMaxZ = reader.ReadFloat();
+        var maximum = new short[9];
+        for (int i = 0; i < 9; i++) maximum[i] = reader.ReadInt16();
+        var minimum = new short[9];
+        for (int i = 0; i < 9; i++) minimum[i] = reader.ReadInt16();
 
-        uint lowerCount = reader.ReadUInt32();
-        uint upperCount = reader.ReadUInt32();
-
-        var lowerVerts = new (short X, short Y, short Z)[Math.Min(lowerCount, 12)];
-        for (int i = 0; i < lowerVerts.Length; i++)
-            lowerVerts[i] = (reader.ReadInt16(), reader.ReadInt16(), reader.ReadInt16());
-
-        var upperVerts = new (short X, short Y, short Z)[Math.Min(upperCount, 12)];
-        for (int i = 0; i < upperVerts.Length; i++)
-            upperVerts[i] = (reader.ReadInt16(), reader.ReadInt16(), reader.ReadInt16());
-
-        return new AdtMfbo
-        {
-            BoxMin = (boxMinX, boxMinY, boxMinZ),
-            BoxMax = (boxMaxX, boxMaxY, boxMaxZ),
-            LowerVertexCount = lowerCount,
-            UpperVertexCount = upperCount,
-            LowerVertices = lowerVerts,
-            UpperVertices = upperVerts
-        };
+        return new AdtMfbo { Maximum = maximum, Minimum = minimum };
     }
 
     private AdtMh2o? ParseMh2o(SpanReader reader, uint offset)

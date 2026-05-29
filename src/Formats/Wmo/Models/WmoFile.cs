@@ -36,15 +36,16 @@ public sealed class WmoGroupFile
     public WmoVertex[] Vertices { get; }
     public WmoTriangle[] Triangles { get; }
     public WmoMaterial[] Materials { get; }
-    public WmoBatch[] Batches { get; }
+    /// <summary>Raw MOBA uint16 data: each batch = 12 uint16s (24 bytes). Matches C++ uint16* MOBA.</summary>
+    public ushort[] RawMoba { get; }
     public WmoLiquidData? Liquid { get; }
 
-    public string Name => RootFileName.Replace(".wmo", $"{GroupIndex:D3}.wmo");
+    public string Name => RootFileName[..^4] + $"_{GroupIndex:D3}.wmo";
 
     internal WmoGroupFile(
         string rootFileName, int groupIndex, WmoGroupHeader header,
         WmoVertex[] vertices, WmoTriangle[] triangles, WmoMaterial[] materials,
-        WmoBatch[] batches, WmoLiquidData? liquid)
+        ushort[] rawMoba, WmoLiquidData? liquid)
     {
         RootFileName = rootFileName;
         GroupIndex = groupIndex;
@@ -52,7 +53,7 @@ public sealed class WmoGroupFile
         Vertices = vertices;
         Triangles = triangles;
         Materials = materials;
-        Batches = batches;
+        RawMoba = rawMoba;
         Liquid = liquid;
     }
 }

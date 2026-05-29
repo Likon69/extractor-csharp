@@ -326,7 +326,7 @@ public sealed class MmapExtractorService
                     continue;
                 }
 
-                string adtPath = $"World\\Maps\\{mapName}\\{mapName}_{adjX:D2}_{adjY:D2}.adt";
+                string adtPath = $"World\\Maps\\{mapName}\\{mapName}_{adjX}_{adjY}.adt";
 
                 var result = await _adtParser.ParseAsync(adtPath, mapId, adjX, adjY, ct);
                 if (!result.Success)
@@ -364,9 +364,23 @@ public sealed class MmapExtractorService
                 foreach (var adt in adts)
                 {
                     await AppendWmoGeometryAsync(adt, modelVerts, modelTris, modelAreas, seenWmoIds, ct);
+                }
+            }
+            int wmoTriCount = modelTris.Count / 3;
+            int wmoVertCount = modelVerts.Count / 3;
+            _logger.LogInformation("[Mmap] ADT ({CX},{CY}): WMO-only: {WmoTris} tris, {WmoVerts} verts ({WmoCount} unique WMOs)",
+                centerX, centerY, wmoTriCount, wmoVertCount, seenWmoIds.Count);
+
+            foreach (var (_, _, adts) in tiles)
+            {
+                foreach (var adt in adts)
+                {
                     AppendM2Geometry(adt, modelVerts, modelTris, modelAreas, seenM2Ids);
                 }
             }
+            int m2TriCount = modelTris.Count / 3 - wmoTriCount;
+            _logger.LogInformation("[Mmap] ADT ({CX},{CY}): M2-only: {M2Tris} tris ({M2Count} unique M2 placements)",
+                centerX, centerY, m2TriCount, seenM2Ids.Count);
 
             if (modelVerts.Count == 0 && (seenWmoIds.Count > 0 || seenM2Ids.Count > 0))
             {
@@ -806,18 +820,14 @@ public sealed class MmapExtractorService
             if (!wmoResult.Success || wmoResult.Root == null)
                 continue;
 
-            // Build rotation matrix using G3D fromEulerAnglesXYZ(ax, ay, az) convention:
-            //   v_world = v_model * Rx(ax) * Ry(ay) * Rz(az)
-            // which in System.Numerics (also row-vector) is:
-            //   Matrix4x4.CreateRotationX(ax) * CreateRotationY(ay) * CreateRotationZ(az)
-            //
-            // TerrainBuilder:
-            //   ax = iRot.z  * pi/-180   iRot = raw MODF rotation (no fixCoords)
-            //   ay = iRot.x  * pi/-180   In our AdtModf: RotationX/Y/Z are stored in binary order X,Y,Z
-            //   az = iRot.y  * pi/-180   so iRot.x=RotationX, iRot.y=RotationY, iRot.z=RotationZ
-            float ax = modf.RotationZ * MathF.PI / -180f;
-            float ay = modf.RotationX * MathF.PI / -180f;
-            float az = modf.RotationY * MathF.PI / -180f;
+            // Build rotation matrix matching C++ TerrainBuilder:
+            //   G3D: rotation = fromEulerAnglesXYZ(iRot.z*pi/-180, iRot.x*pi/-180, iRot.y*pi/-180)
+            //   G3D v * kXMat(θ) = Rx(-θ) because G3D column-vector matrix used in row-vector multiply.
+            //   So v * kXMat(-α) = Rx(α). Net effect: Rx(RotZ*π/180), Ry(RotX*π/180), Rz(RotY*π/180).
+            //   System.Numerics CreateRotationX(θ) = standard Rx(θ) → use POSITIVE angles.
+            float ax = modf.RotationZ * MathF.PI / 180f;
+            float ay = modf.RotationX * MathF.PI / 180f;
+            float az = modf.RotationY * MathF.PI / 180f;
             var rotMatrix = Matrix4x4.CreateRotationX(ax)
                           * Matrix4x4.CreateRotationY(ay)
                           * Matrix4x4.CreateRotationZ(az);
@@ -833,27 +843,27 @@ public sealed class MmapExtractorService
             {
                 ct.ThrowIfCancellationRequested();
 
-                string groupPath = wmoName.Replace(".wmo", $"{groupIdx:D3}.wmo");
+                string groupPath = BuildWmoGroupPath(wmoName, groupIdx);
                 var grp = await _wmoParser.ParseGroupAsync(groupPath, (int)groupIdx, wmoName, ct);
-                if (grp == null || grp.Vertices.Length == 0 || grp.Triangles.Length == 0)
+                if (grp == null)
+                {
+                    _logger.LogInformation("[WMO] {Path} group {Idx}: parse returned null", wmoName, groupIdx);
                     continue;
+                }
+                if (grp.Vertices.Length == 0 || grp.Triangles.Length == 0)
+                {
+                    _logger.LogInformation("[WMO] {Path} group {Idx}: {V} verts, {T} tris → skipped (empty)", wmoName, groupIdx, grp.Vertices.Length, grp.Triangles.Length);
+                    continue;
+                }
+                _logger.LogInformation("[WMO] {Path} group {Idx}: {V} verts, {T} tris → adding", wmoName, groupIdx, grp.Vertices.Length, grp.Triangles.Length);
 
-                // Filter triangles using vmap-extractor logic:
-                //   keep if (NoCollision NOT set) AND (Hint OR CollideHit IS set)
+                // Precise mode (preciseVectorData=true): include ALL triangles.
+                // Matches MaNGOS C++ default — no MOPY filtering for mmap/navmesh.
+                // Recast's slope filter handles walls (too steep = non-walkable);
+                // solid geometry blocks agents from walking through buildings.
                 var validTris = new List<int>(grp.Triangles.Length);
                 for (int t = 0; t < grp.Triangles.Length; t++)
-                {
-                    WmoMaterialFlag flags = t < grp.Materials.Length
-                        ? grp.Materials[t].Flags
-                        : WmoMaterialFlag.CollideHit; // assume collidable if no MOPY entry
-
-                    bool noCollision = (flags & WmoMaterialFlag.NoCollision) != 0;
-                    bool hasCollideFlag = (flags & (WmoMaterialFlag.Hint | WmoMaterialFlag.CollideHit)) != 0;
-                    if (noCollision || !hasCollideFlag)
-                        continue;
-
                     validTris.Add(t);
-                }
 
                 if (validTris.Count == 0)
                     continue;
@@ -876,8 +886,9 @@ public sealed class MmapExtractorService
                         continue;
                     var v = grp.Vertices[vi];
                     vertRemap[vi] = outVerts.Count / 3;
-                    // fixCoords(v) = (v.Z, v.X, v.Y) — mirrors VMap extractor's fixCoords before mmap generator reads it
-                    AppendTransformedVertex(v.Z, v.X, v.Y, rotMatrix, 1.0f, posX, posY, posZ, outVerts);
+                    // VMapExtractor stores raw MOVT vertices (no fixCoords on individual vertices).
+                    // TerrainBuilder reads them raw — coordinate mapping is done by transform() itself.
+                    AppendTransformedVertex(v.X, v.Y, v.Z, rotMatrix, 1.0f, posX, posY, posZ, outVerts);
                 }
 
                 // Add triangles (no winding flip for WMO — isM2=false in original)
@@ -931,12 +942,11 @@ public sealed class MmapExtractorService
             // Build rotation matrix.
             // MDDF rotation binary order: RotationY (yaw, first), RotationX (pitch, second), RotationZ (roll, third)
             // In vmap: rot.x = ff[0] = mddf.RotationY (C# field), rot.y = ff[1] = mddf.RotationX, rot.z = ff[2] = mddf.RotationZ
-            // TerrainBuilder: ax = iRot.z*pi/-180 = RotationZ*pi/-180
-            //                 ay = iRot.x*pi/-180 = RotationY*pi/-180  (C# field RotationY = first binary float)
-            //                 az = iRot.y*pi/-180 = RotationX*pi/-180  (C# field RotationX = second binary float)
-            float ax = mddf.RotationZ * MathF.PI / -180f;
-            float ay = mddf.RotationY * MathF.PI / -180f; // C# field RotationY = yaw = vmap rot.x
-            float az = mddf.RotationX * MathF.PI / -180f; // C# field RotationX = pitch = vmap rot.y
+            // Same sign fix as WMO: C++ G3D v*kXMat(-α)=Rx(α), so use POSITIVE angles.
+            //   ax = RotationZ*π/180, ay = RotationY*π/180, az = RotationX*π/180
+            float ax = mddf.RotationZ * MathF.PI / 180f;
+            float ay = mddf.RotationY * MathF.PI / 180f; // C# field RotationY = yaw = vmap rot.x
+            float az = mddf.RotationX * MathF.PI / 180f; // C# field RotationX = pitch = vmap rot.y
             var rotMatrix = Matrix4x4.CreateRotationX(ax)
                           * Matrix4x4.CreateRotationY(ay)
                           * Matrix4x4.CreateRotationZ(az);
@@ -1007,24 +1017,31 @@ public sealed class MmapExtractorService
 
     private GameObjectModelData? LoadGameObjectM2(string modelPath)
     {
-        if (!_m2Parser.TryParseBoundingMesh(modelPath, out float[] vertices, out ushort[] indices)
-            || vertices.Length == 0 || indices.Length == 0)
+        if (!_m2Parser.TryParseBoundingMesh(modelPath, out float[] mverts, out ushort[] indices)
+            || mverts.Length == 0 || indices.Length == 0)
             return null;
 
-        // M2 is Z-up: keep raw vertices — same as AppendM2Geometry, no fixCoords needed
+        // Apply fixCoords(v) = (v.Z, v.X, v.Y) to match the VMap pipeline:
+        // VMapExtractor stores M2 vertices as fixCoords(raw), so TerrainBuilder reads them
+        // pre-transformed. LoadGameObjectWmo does the same. We must be consistent.
+        int nv = mverts.Length / 3;
+        float[] vertices = new float[nv * 3];
         Vector3 boundsMin = new(float.MaxValue, float.MaxValue, float.MaxValue);
         Vector3 boundsMax = new(float.MinValue, float.MinValue, float.MinValue);
-        for (int i = 0; i < vertices.Length; i += 3)
+        for (int i = 0; i < nv; i++)
         {
-            float x = vertices[i + 0];
-            float y = vertices[i + 1];
-            float z = vertices[i + 2];
-            boundsMin.X = MathF.Min(boundsMin.X, x);
-            boundsMin.Y = MathF.Min(boundsMin.Y, y);
-            boundsMin.Z = MathF.Min(boundsMin.Z, z);
-            boundsMax.X = MathF.Max(boundsMax.X, x);
-            boundsMax.Y = MathF.Max(boundsMax.Y, y);
-            boundsMax.Z = MathF.Max(boundsMax.Z, z);
+            float rx = mverts[i * 3 + 2]; // fixCoords: vz → stored x
+            float ry = mverts[i * 3 + 0]; // fixCoords: vx → stored y
+            float rz = mverts[i * 3 + 1]; // fixCoords: vy → stored z
+            vertices[i * 3 + 0] = rx;
+            vertices[i * 3 + 1] = ry;
+            vertices[i * 3 + 2] = rz;
+            boundsMin.X = MathF.Min(boundsMin.X, rx);
+            boundsMin.Y = MathF.Min(boundsMin.Y, ry);
+            boundsMin.Z = MathF.Min(boundsMin.Z, rz);
+            boundsMax.X = MathF.Max(boundsMax.X, rx);
+            boundsMax.Y = MathF.Max(boundsMax.Y, ry);
+            boundsMax.Z = MathF.Max(boundsMax.Z, rz);
         }
 
         return new GameObjectModelData(
@@ -1047,29 +1064,15 @@ public sealed class MmapExtractorService
 
         for (uint groupIdx = 0; groupIdx < rootResult.Root.Header.GroupCount; groupIdx++)
         {
-            string groupPath = modelPath.Replace(".wmo", $"{groupIdx:D3}.wmo");
+            string groupPath = BuildWmoGroupPath(modelPath, groupIdx);
             var group = _wmoParser.ParseGroupAsync(groupPath, (int)groupIdx, modelPath).GetAwaiter().GetResult();
             if (group == null || group.Vertices.Length == 0 || group.Triangles.Length == 0)
                 continue;
 
+            // Precise mode: include ALL triangles (no MOPY filtering).
             var validTris = new List<int>(group.Triangles.Length);
             for (int t = 0; t < group.Triangles.Length; t++)
-            {
-                WmoMaterialFlag flags = t < group.Materials.Length
-                    ? group.Materials[t].Flags
-                    : WmoMaterialFlag.CollideHit;
-
-                bool noCollision = (flags & WmoMaterialFlag.NoCollision) != 0;
-                bool hasCollision = (flags & (WmoMaterialFlag.Hint | WmoMaterialFlag.CollideHit)) != 0;
-                if (noCollision || !hasCollision)
-                    continue;
-
                 validTris.Add(t);
-            }
-
-            if (validTris.Count == 0)
-                continue;
-
             var usedVerts = new HashSet<ushort>(validTris.Count * 3);
             foreach (int triIndex in validTris)
             {
@@ -1146,12 +1149,23 @@ public sealed class MmapExtractorService
             AppendTransformedVertex(vx, vy, vz, rotation, spawn.Scale, posX, posY, posZ, outVerts);
         }
 
+        // M2 models need winding reversed — mirrors TerrainBuilder::copyIndices(tris, offset, isM2=true).
+        // WMO GOs keep original winding (isM2=false → no flip).
+        bool flipWinding = modelData.IsM2;
         for (int i = 0; i < modelData.Indices.Length; i += 3)
         {
-            outIndices.Add(baseIndex + modelData.Indices[i + 0]);
-            outIndices.Add(baseIndex + modelData.Indices[i + 1]);
-            outIndices.Add(baseIndex + modelData.Indices[i + 2]);
-
+            if (flipWinding)
+            {
+                outIndices.Add(baseIndex + modelData.Indices[i + 2]);
+                outIndices.Add(baseIndex + modelData.Indices[i + 1]);
+                outIndices.Add(baseIndex + modelData.Indices[i + 0]);
+            }
+            else
+            {
+                outIndices.Add(baseIndex + modelData.Indices[i + 0]);
+                outIndices.Add(baseIndex + modelData.Indices[i + 1]);
+                outIndices.Add(baseIndex + modelData.Indices[i + 2]);
+            }
             outAreas.Add(1);
         }
     }
@@ -1161,6 +1175,26 @@ public sealed class MmapExtractorService
     // Format: mapId tx,ty (x y z) (x y z) size [areaType] [direction]
     // Verts stored as (p0[1], p0[2], p0[0]) per C++ convention (same as solidVerts space).
     // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Builds a WMO group file path from the root WMO path.
+    /// Handles both uppercase (.WMO) and lowercase (.wmo) extensions.
+    /// Mirrors C++ vmap-extractor: sprintf("%s_%03d.wmo", baseName, i)
+    /// "STORMWIND.WMO" + 110 → "STORMWIND_110.wmo"
+    /// </summary>
+    private static string BuildWmoGroupPath(string wmoPath, uint groupIdx)
+    {
+        int extIndex = wmoPath.LastIndexOf('.');
+        if (extIndex < 0)
+            return wmoPath + "_" + groupIdx.ToString("D3", CultureInfo.InvariantCulture) + ".wmo";
+
+        return string.Concat(
+            wmoPath.AsSpan(0, extIndex),
+            "_",
+            groupIdx.ToString("D3", CultureInfo.InvariantCulture),
+            ".wmo");
+    }
+
     private static readonly Regex OffMeshLineRegex = new(
         @"^(\d+)\s+(-?\d+),(-?\d+)\s+\((-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+\((-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\)\s+([\d.]+)(?:\s+(\d+))?(?:\s+(\d+))?",
         RegexOptions.Compiled);

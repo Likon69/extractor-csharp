@@ -88,7 +88,7 @@ public sealed class VmapExtractorService
     private async Task<(bool ok, int wmoCount, int m2Count, int groupCount)> ProcessTileAsync(uint mapId, string mapName, int tileX, int tileY, CancellationToken ct)
     {
         int wmoCount = 0, m2Count = 0, wmoGroupCount = 0;
-        string adtPath = $"World\\Maps\\{mapName}\\{mapName}_{tileX:D2}_{tileY:D2}.adt";
+        string adtPath = $"World\\Maps\\{mapName}\\{mapName}_{tileX}_{tileY}.adt";
 
         var result = await _adtParser.ParseAsync(adtPath, mapId, tileX, tileY, ct);
         if (!result.Success)
@@ -116,7 +116,7 @@ public sealed class VmapExtractorService
             wmoCount++;
             for (uint groupIdx = 0; groupIdx < wmoResult.Root!.Header.GroupCount; groupIdx++)
             {
-                string groupFilePath = wmoName.Replace(".wmo", $"{groupIdx:D3}.wmo");
+                string groupFilePath = wmoName[..^4] + $"_{groupIdx:D3}.wmo";
                 var grpFile = await _wmoParser.ParseGroupAsync(groupFilePath, (int)groupIdx, wmoName, ct);
 
                 var bbMin = grpFile != null ? grpFile.Header.BoundingBoxMin : wmoResult.Root.Header.BoundingBoxMin;
@@ -132,8 +132,8 @@ public sealed class VmapExtractorService
                     LiquidFlags = grpFile?.Header.LiquidType ?? 0,
                     Vertices = BuildVertexArray(grpFile?.Vertices),
                     Indices = BuildIndexArray(grpFile?.Triangles),
-                    MobaData = BuildMobaData(grpFile?.Batches),
-                    BatchCount = grpFile?.Batches.Length ?? 0
+                    MobaData = BuildMobaData(grpFile?.RawMoba),
+                    BatchCount = (grpFile?.RawMoba?.Length ?? 0) / 12
                 };
                 tile.AddGroup(group);
                 wmoGroupCount++;
@@ -206,12 +206,16 @@ public sealed class VmapExtractorService
         return result;
     }
 
-    private static int[] BuildMobaData(WmoBatch[]? batches)
+    private static int[] BuildMobaData(ushort[]? rawMoba)
     {
-        if (batches == null || batches.Length == 0) return Array.Empty<int>();
-        var result = new int[batches.Length];
-        for (int i = 0; i < batches.Length; i++)
-            result[i] = (int)(batches[i].VertexCount & 0xFFFF);
+        // Matches C++ exactly: moba_batch = moba_size/12; MobaEx[k] = MOBA[8 + k*12];
+        // Each batch = 12 uint16s = 24 bytes; value at uint16[8] = byte 16 of each batch.
+        if (rawMoba == null || rawMoba.Length < 12) return Array.Empty<int>();
+        int batchCount = rawMoba.Length / 12;
+        var result = new int[batchCount];
+        int k = 0;
+        for (int i = 8; i < rawMoba.Length; i += 12)
+            result[k++] = rawMoba[i];
         return result;
     }
 

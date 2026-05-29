@@ -151,10 +151,8 @@ public struct AdtModf
 
 public struct AdtMfbo
 {
-    public (float X, float Y, float Z) BoxMin;
-    public (float X, float Y, float Z) BoxMax;
-    public uint LowerVertexCount;
-    public uint UpperVertexCount;
-    public (short X, short Y, short Z)[] LowerVertices;
-    public (short X, short Y, short Z)[] UpperVertices;
+    /// <summary>Maximum plane: short[3][3] grid of heights.</summary>
+    public short[] Maximum;
+    /// <summary>Minimum plane: short[3][3] grid of heights.</summary>
+    public short[] Minimum;
 }

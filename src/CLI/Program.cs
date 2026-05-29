@@ -9,6 +9,7 @@ using MaNGOS.Extractor.RoadExtractor;
 using MaNGOS.Extractor.UI;
 using MaNGOS.Extractor.VmapExtractor;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Console;
 
 namespace MaNGOS.Extractor.CLI;
 
@@ -34,7 +35,9 @@ public static class Program
         if (options == null) return 1;
         Banner(options);
 
-        _loggerFactory = LoggerFactory.Create(b => b.SetMinimumLevel(LogLevel.Information));
+        _loggerFactory = LoggerFactory.Create(b => b
+            .SetMinimumLevel(LogLevel.Information)
+            .AddSimpleConsole(o => { o.SingleLine = true; o.TimestampFormat = null; }));
 
         using var archives = MpqArchiveCollection.FromWoWDirectory(
             options.WoWPath, options.Locale, _loggerFactory);
@@ -99,6 +102,7 @@ public static class Program
                     recast, options.Threads, options.GoSpawnsPath, offMeshPath: null, roadMapsDir: roadDir);
                 int tiles = await svc.ExtractMapAsync(mapId, mapName, progress, ct, options.TileX, options.TileY);
                 Console.WriteLine($"  [Mmap] {tiles} tiles extracted.");
+                processed += tiles;
             }
         }
 

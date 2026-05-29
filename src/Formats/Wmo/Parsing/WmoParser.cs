@@ -98,27 +98,28 @@ public sealed class WmoParser
             switch (chunkMagic)
             {
                 case MagicBytes.Mogn: // Group names
-                    ParseMogn(reader, chunkSize2, groupNames);
+                    ParseMogn(ref reader, chunkSize2, groupNames);
                     break;
 
                 case MagicBytes.Motx: // Texture names
-                    ParseMotx(reader, chunkSize2, textureNames);
+                    ParseMotx(ref reader, chunkSize2, textureNames);
                     break;
 
                 case MagicBytes.Modn: // Doodad names
-                    ParseModn(reader, chunkSize2, doodadNames);
+                    ParseModn(ref reader, chunkSize2, doodadNames);
                     break;
 
                 case MagicBytes.Modd: // Doodad placements
-                    ParseModd(reader, chunkSize2, doodadPlacements);
+                    ParseModd(ref reader, chunkSize2, doodadPlacements);
                     break;
 
                 case MagicBytes.Mods: // Doodad sets
-                    ParseMods(reader, chunkSize2, doodadSets);
+                    ParseMods(ref reader, chunkSize2, doodadSets);
                     break;
 
                 default:
                     warnings.Add($"Unknown WMO chunk: {MagicBytes.FourCCToString(chunkMagic)} at offset {(int)chunkSize - reader.Remaining}");
+                    reader.Skip((int)chunkSize2);
                     break;
             }
 
@@ -168,7 +169,11 @@ public sealed class WmoParser
             magic = reader.ReadUInt32(); // read MOGP magic
         }
         if (magic != MagicBytes.Mogp)
+        {
+            _logger.LogWarning("[WmoParser] {Path} group {Idx}: expected MOGP 0x{Expected:X8} but got 0x{Got:X8} (file size={Size})",
+                path, groupIndex, MagicBytes.Mogp, magic, data.Length);
             return null;
+        }
 
         uint chunkSize = reader.ReadUInt32();
 
@@ -190,11 +195,15 @@ public sealed class WmoParser
             GroupWmoId = reader.ReadUInt32()
         };
 
+        // WotLK 3.3.5a MOGP header is 68 bytes total; C++ reads 60 then seeks to +68.
+        // The remaining 8 bytes (flags2 + unk) must be skipped before sub-chunks.
+        reader.Skip(8);
+
         // Parse sub-chunks
         var vertices = new List<WmoVertex>();
         var triangles = new List<WmoTriangle>();
         var materials = new List<WmoMaterial>();
-        var batches = new List<WmoBatch>();
+        ushort[] rawMoba = Array.Empty<ushort>();
         WmoLiquidData? liquid = null;
 
         while (reader.Remaining > 8)
@@ -205,27 +214,27 @@ public sealed class WmoParser
             switch (chunkMagic)
             {
                 case MagicBytes.Movt: // Group WMO files use MOVT for vertices (MOVV is root-only portal vertices)
-                    ParseMovv(reader, chunkSize2, vertices);
+                    ParseMovv(ref reader, chunkSize2, vertices);
                     break;
 
                 case MagicBytes.Movi: // Indices
-                    ParseMovi(reader, chunkSize2, triangles);
+                    ParseMovi(ref reader, chunkSize2, triangles);
                     break;
 
                 case MagicBytes.Mopy:
-                    ParseMopy(reader, (int)chunkSize2, materials);
+                    ParseMopy(ref reader, (int)chunkSize2, materials);
                     break;
 
                 case MagicBytes.Moba:
-                    ParseMoba(reader, (int)chunkSize2, batches);
+                    rawMoba = ParseMoba(ref reader, (int)chunkSize2);
                     break;
 
-                case MagicBytes.Liqu:
-                    liquid = ParseLiquid(reader, (int)chunkSize2);
+                case MagicBytes.LiquidMapMagic: // "MLIQ" — WMO group liquid (C++ wmo.cpp: strcmp(fourcc,"MLIQ"))
+                    liquid = ParseLiquid(ref reader, (int)chunkSize2);
                     break;
 
                 default:
-                    // Skip unknown chunks
+                    reader.Skip((int)chunkSize2);
                     break;
             }
 
@@ -239,11 +248,11 @@ public sealed class WmoParser
             vertices.ToArray(),
             triangles.ToArray(),
             materials.ToArray(),
-            batches.ToArray(),
+            rawMoba,
             liquid);
     }
 
-    private void ParseMogn(SpanReader reader, uint chunkSize, List<string> names)
+    private void ParseMogn(ref SpanReader reader, uint chunkSize, List<string> names)
     {
         int endPos = reader.Position + (int)chunkSize;
         while (reader.Position < endPos && reader.Remaining > 8)
@@ -257,7 +266,7 @@ public sealed class WmoParser
             reader.Skip(endPos + padding - reader.Position);
     }
 
-    private void ParseMotx(SpanReader reader, uint size, List<string> textures)
+    private void ParseMotx(ref SpanReader reader, uint size, List<string> textures)
     {
         var data = reader.ReadSpan((int)size);
         int pos = 0;
@@ -273,7 +282,7 @@ public sealed class WmoParser
         // ReadSpan already advanced reader by size bytes — caller handles padding
     }
 
-    private void ParseModn(SpanReader reader, uint size, List<string> names)
+    private void ParseModn(ref SpanReader reader, uint size, List<string> names)
     {
         var data = reader.ReadSpan((int)size);
         int pos = 0;
@@ -289,7 +298,7 @@ public sealed class WmoParser
         // ReadSpan already advanced reader by size bytes — caller handles padding
     }
 
-    private void ParseModd(SpanReader reader, uint size, List<WmoDoodadPlacement> placements)
+    private void ParseModd(ref SpanReader reader, uint size, List<WmoDoodadPlacement> placements)
     {
         uint count = size / 36; // MODD entry size
         for (uint i = 0; i < count; i++)
@@ -309,7 +318,7 @@ public sealed class WmoParser
         }
     }
 
-    private void ParseMods(SpanReader reader, uint size, List<WmoDoodadSet> sets)
+    private void ParseMods(ref SpanReader reader, uint size, List<WmoDoodadSet> sets)
     {
         uint count = size / 32; // MODS entry size
         for (uint i = 0; i < count; i++)
@@ -325,7 +334,7 @@ public sealed class WmoParser
         }
     }
 
-    private void ParseMovv(SpanReader reader, uint size, List<WmoVertex> vertices)
+    private void ParseMovv(ref SpanReader reader, uint size, List<WmoVertex> vertices)
     {
         uint count = size / 12; // 3 floats per vertex
         for (uint i = 0; i < count; i++)
@@ -339,7 +348,7 @@ public sealed class WmoParser
         }
     }
 
-    private void ParseMovi(SpanReader reader, uint size, List<WmoTriangle> triangles)
+    private void ParseMovi(ref SpanReader reader, uint size, List<WmoTriangle> triangles)
     {
         uint count = size / 6; // 3 uint16 per triangle
         for (uint i = 0; i < count; i++)
@@ -353,7 +362,7 @@ public sealed class WmoParser
         }
     }
 
-    private void ParseMopy(SpanReader reader, int size, List<WmoMaterial> materials)
+    private void ParseMopy(ref SpanReader reader, int size, List<WmoMaterial> materials)
     {
         uint count = (uint)size / 2;
         for (uint i = 0; i < count; i++)
@@ -370,45 +379,20 @@ public sealed class WmoParser
         }
     }
 
-    private void ParseMobr(SpanReader reader, uint size, List<WmoBatch> batches)
+    private ushort[] ParseMoba(ref SpanReader reader, int size)
     {
-        // 20 bytes per batch
-        uint count = size / 20;
-        for (uint i = 0; i < count; i++)
-        {
-            batches.Add(new WmoBatch
-            {
-                Flags = reader.ReadUInt32(),
-                FirstIndex = reader.ReadUInt32(),
-                IndexCount = reader.ReadUInt32(),
-                FirstVertex = reader.ReadUInt32(),
-                VertexCount = reader.ReadUInt32(),
-                MaterialId = reader.ReadUInt32()
-            });
-        }
-    }
-
-    private void ParseMoba(SpanReader reader, int size, List<WmoBatch> batches)
-    {
-        // MOBA: 20 bytes per batch, same as MOBR
-        int count = size / 20;
+        // Read raw as uint16 array — exactly like C++: MOBA = new uint16[size/2]; f.read(MOBA, size);
+        // Each batch = 12 uint16s = 24 bytes. moba_batch = moba_size/12.
+        int count = size / 2;
+        var raw = new ushort[count];
         for (int i = 0; i < count; i++)
-        {
-            batches.Add(new WmoBatch
-            {
-                Flags = reader.ReadUInt32(),
-                FirstIndex = reader.ReadUInt32(),
-                IndexCount = reader.ReadUInt32(),
-                FirstVertex = reader.ReadUInt32(),
-                VertexCount = reader.ReadUInt32(),
-                MaterialId = reader.ReadUInt32()
-            });
-        }
+            raw[i] = reader.ReadUInt16();
+        return raw;
     }
 
-    private WmoLiquidData? ParseLiquid(SpanReader reader, int size)
+    private WmoLiquidData? ParseLiquid(ref SpanReader reader, int size)
     {
-        if (size < 32)
+        if (size < 30) // C++ WMOLiquidHeader = 0x1E = 30 bytes exactly
             return null;
 
         var header = new WmoLiquidHeader
@@ -422,14 +406,18 @@ public sealed class WmoParser
             PositionZ = reader.ReadFloat(),
             LiquidType = reader.ReadInt16()
         };
-        reader.Skip(2); // Padding
+        // C++ struct WMOLiquidHeader = 30 bytes exactly, no struct padding in file
 
+        // C++ WMOLiquidVert = { uint16 unk1, uint16 unk2, float height } = 8 bytes each
         int heightCount = header.VertexX * header.VertexY;
         int tileCount = header.TileX * header.TileY;
 
         var heights = new float[heightCount];
         for (int i = 0; i < heightCount; i++)
+        {
+            reader.Skip(4); // unk1 (uint16) + unk2 (uint16)
             heights[i] = reader.ReadFloat();
+        }
 
         var tileFlags = new byte[tileCount];
         for (int i = 0; i < tileCount; i++)

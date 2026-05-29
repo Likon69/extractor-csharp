@@ -17,6 +17,8 @@ public sealed class WdtReader
 
     public async Task<bool> LoadAsync(string mapName, CancellationToken ct = default)
     {
+        Array.Clear(_tileExists, 0, _tileExists.Length);
+
         string path = $"World\\Maps\\{mapName}\\{mapName}.wdt";
 
         if (!_archive.TryReadFile(path, out ReadOnlyMemory<byte> data))
