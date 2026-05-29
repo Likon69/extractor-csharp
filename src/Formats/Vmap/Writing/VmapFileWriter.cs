@@ -26,6 +26,12 @@ public sealed class VmapFileWriter
             Directory.CreateDirectory(outputDir);
     }
 
+    public bool OutputFileExists(uint mapId, int tileX, int tileY)
+    {
+        string dirPath = Path.Combine(_outputDir, $"{mapId:D3}");
+        return File.Exists(Path.Combine(dirPath, $"{mapId:D3}_{tileX:D2}_{tileY:D2}.vmap"));
+    }
+
     /// <summary>
     /// Writes VMAP tile files for a map.
     /// </summary>

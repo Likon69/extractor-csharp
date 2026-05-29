@@ -88,6 +88,12 @@ public sealed class RoadExtractorService
 
     private async Task<(bool ok, int roadChunkCount, int totalChunkCount)> ProcessTileAsync(uint mapId, string mapName, int tileX, int tileY, CancellationToken ct)
     {
+        if (File.Exists(Path.Combine(_outputDir, $"{mapId:D3}{tileY:D2}{tileX:D2}.road")))
+        {
+            _logger.LogDebug("[Road] Skipping ({TileX},{TileY}) — already exists", tileX, tileY);
+            return (true, 0, 256);
+        }
+
         int roadChunkCount = 0, totalChunkCount = 256;
         string adtPath = $"World\\Maps\\{mapName}\\{mapName}_{tileX}_{tileY}.adt";
 

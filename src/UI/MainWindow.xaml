@@ -3,7 +3,12 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="clr-namespace:MaNGOS.Extractor.UI.ViewModels"
         xmlns:ctrl="clr-namespace:MaNGOS.Extractor.UI.Controls"
-        Title="MaNGOS Extractor - WotLK 3.3.5a" Height="700" Width="1000">
+    Title="MaNGOS Extractor - WotLK 3.3.5a"
+    Height="700"
+    Width="1000"
+    Background="{StaticResource WindowBackground}"
+    BorderBrush="{StaticResource BorderBrush}"
+    BorderThickness="1">
     <Window.DataContext>
         <vm:MainViewModel/>
     </Window.DataContext>
@@ -12,7 +17,6 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="120"/>
         </Grid.RowDefinitions>
 
         <!-- Toolbar -->
@@ -36,8 +40,8 @@
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
-            <!-- Left panel: Maps + Recast params -->
-            <Border Grid.Column="0" BorderBrush="#CCC" BorderThickness="1" Margin="0,0,8,0">
+            <!-- Left panel: Maps + Recast params (full height) -->
+            <Border Grid.Column="0" Margin="0,0,8,0">
                 <ScrollViewer>
                     <StackPanel Margin="8">
                         <!-- Maps section -->
@@ -48,7 +52,7 @@
                                   Margin="0,0,0,4"
                                   Visibility="{Binding HasMaps, Converter={StaticResource BoolToVisibilityConverter}}"/>
                         <!-- Liste individuelle avec checkboxes -->
-                        <Border MaxHeight="200" BorderBrush="#555" BorderThickness="1" Margin="0,0,0,4"
+                        <Border MaxHeight="200" Margin="0,0,0,4"
                                 Visibility="{Binding HasMaps, Converter={StaticResource BoolToVisibilityConverter}}">
                             <ScrollViewer VerticalScrollBarVisibility="Auto">
                                 <ItemsControl ItemsSource="{Binding SelectedMaps}">
@@ -90,7 +94,6 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
 
                             <Label Grid.Row="0" Grid.Column="0" Content="CellSize:"/>
@@ -114,26 +117,23 @@
                                            Text="/ 20"/>
                             </StackPanel>
 
-                            <Label Grid.Row="4" Grid.Column="0" Content="BigBase:"/>
-                            <CheckBox Grid.Row="4" Grid.Column="1" IsChecked="{Binding BigBaseUnit}" VerticalAlignment="Center"/>
+                            <Label Grid.Row="4" Grid.Column="0" Content="Locale:"/>
+                            <ComboBox Grid.Row="4" Grid.Column="1" ItemsSource="{Binding Locales}" SelectedItem="{Binding SelectedLocale}"/>
 
-                            <Label Grid.Row="5" Grid.Column="0" Content="Locale:"/>
-                            <ComboBox Grid.Row="5" Grid.Column="1" ItemsSource="{Binding Locales}" SelectedItem="{Binding SelectedLocale}"/>
+                            <Label Grid.Row="5" Grid.Column="0" Content="Height:"/>
+                            <TextBox Grid.Row="5" Grid.Column="1" Text="{Binding WalkableHeight, UpdateSourceTrigger=PropertyChanged}"/>
 
-                            <Label Grid.Row="6" Grid.Column="0" Content="Height:"/>
-                            <TextBox Grid.Row="6" Grid.Column="1" Text="{Binding WalkableHeight, UpdateSourceTrigger=PropertyChanged}"/>
+                            <Label Grid.Row="6" Grid.Column="0" Content="Radius:"/>
+                            <TextBox Grid.Row="6" Grid.Column="1" Text="{Binding WalkableRadius, UpdateSourceTrigger=PropertyChanged}"/>
 
-                            <Label Grid.Row="7" Grid.Column="0" Content="Radius:"/>
-                            <TextBox Grid.Row="7" Grid.Column="1" Text="{Binding WalkableRadius, UpdateSourceTrigger=PropertyChanged}"/>
+                            <Label Grid.Row="7" Grid.Column="0" Content="Climb:"/>
+                            <TextBox Grid.Row="7" Grid.Column="1" Text="{Binding WalkableClimb, UpdateSourceTrigger=PropertyChanged}"/>
 
-                            <Label Grid.Row="8" Grid.Column="0" Content="Climb:"/>
-                            <TextBox Grid.Row="8" Grid.Column="1" Text="{Binding WalkableClimb, UpdateSourceTrigger=PropertyChanged}"/>
+                            <Label Grid.Row="8" Grid.Column="0" Content="One tile:"/>
+                            <CheckBox Grid.Row="8" Grid.Column="1" IsChecked="{Binding SingleTileEnabled}" VerticalAlignment="Center"/>
 
-                            <Label Grid.Row="9" Grid.Column="0" Content="One tile:"/>
-                            <CheckBox Grid.Row="9" Grid.Column="1" IsChecked="{Binding SingleTileEnabled}" VerticalAlignment="Center"/>
-
-                            <Label Grid.Row="10" Grid.Column="0" Content="Tile X/Y:"/>
-                            <Grid Grid.Row="10" Grid.Column="1">
+                            <Label Grid.Row="9" Grid.Column="0" Content="Tile X/Y:"/>
+                            <Grid Grid.Row="9" Grid.Column="1">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*"/>
                                     <ColumnDefinition Width="8"/>
@@ -191,14 +191,41 @@
                 </ScrollViewer>
             </Border>
 
-            <!-- Right panel: Map grid -->
-            <Border Grid.Column="1" BorderBrush="#CCC" BorderThickness="1" Background="{StaticResource PanelBackground}">
-                <ctrl:MapGridControl ViewModel="{Binding TileGrid}"/>
-            </Border>
+            <!-- Right panel: tile grid (top) + log (bottom, resizable via GridSplitter) -->
+            <Grid Grid.Column="1">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="5"/>
+                    <RowDefinition Height="180" MinHeight="60"/>
+                </Grid.RowDefinitions>
+
+                <Border Grid.Row="0" Background="{StaticResource PanelBackground}">
+                    <ctrl:MapGridControl ViewModel="{Binding TileGrid}"/>
+                </Border>
+
+                <GridSplitter Grid.Row="1" Height="5" HorizontalAlignment="Stretch"
+                              Background="{StaticResource BorderBrush}" Cursor="SizeNS"/>
+
+                <!-- Log output (selectable + copyable, resizable) -->
+                <Border Grid.Row="2" Background="#1E1E1E">
+                    <TextBox x:Name="LogTextBox"
+                             IsReadOnly="True"
+                             Background="Transparent"
+                             Foreground="#D4D4D4"
+                             BorderThickness="0"
+                             FontFamily="Consolas"
+                             FontSize="11"
+                             Padding="8"
+                             VerticalScrollBarVisibility="Auto"
+                             HorizontalScrollBarVisibility="Disabled"
+                             TextWrapping="Wrap"
+                             IsReadOnlyCaretVisible="False"/>
+                </Border>
+            </Grid>
         </Grid>
 
         <!-- Progress bar -->
-        <Grid Grid.Row="2" Margin="0,8">
+        <Grid Grid.Row="2" Margin="0,8,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
@@ -211,21 +238,5 @@
                 <Run Text=" tiles"/>
             </TextBlock>
         </Grid>
-
-        <!-- Log output (selectable + copyable via Ctrl+C / Ctrl+A) -->
-        <Border Grid.Row="3" BorderBrush="#3F3F46" BorderThickness="1" Background="#1E1E1E">
-            <TextBox x:Name="LogTextBox"
-                     IsReadOnly="True"
-                     Background="Transparent"
-                     Foreground="#D4D4D4"
-                     BorderThickness="0"
-                     FontFamily="Consolas"
-                     FontSize="11"
-                     Padding="8"
-                     VerticalScrollBarVisibility="Auto"
-                     HorizontalScrollBarVisibility="Disabled"
-                     TextWrapping="Wrap"
-                     IsReadOnlyCaretVisible="False"/>
-        </Border>
     </Grid>
 </Window>

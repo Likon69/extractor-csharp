@@ -21,6 +21,9 @@ public sealed class MapFileWriter
             Directory.CreateDirectory(outputDir);
     }
 
+    public bool OutputFileExists(uint mapId, int tileX, int tileY)
+        => File.Exists(Path.Combine(_outputDir, $"{mapId:D3}{tileY:D2}{tileX:D2}.map"));
+
     public async Task WriteTileAsync(MapTile tile, CancellationToken ct = default)
     {
         string fileName = $"{tile.MapId:D3}{tile.TileY:D2}{tile.TileX:D2}.map";

@@ -87,6 +87,12 @@ public sealed class VmapExtractorService
 
     private async Task<(bool ok, int wmoCount, int m2Count, int groupCount)> ProcessTileAsync(uint mapId, string mapName, int tileX, int tileY, CancellationToken ct)
     {
+        if (_writer.OutputFileExists(mapId, tileX, tileY))
+        {
+            _logger.LogDebug("[Vmap] Skipping ({TileX},{TileY}) — already exists", tileX, tileY);
+            return (true, 0, 0, 0);
+        }
+
         int wmoCount = 0, m2Count = 0, wmoGroupCount = 0;
         string adtPath = $"World\\Maps\\{mapName}\\{mapName}_{tileX}_{tileY}.adt";
 

@@ -257,6 +257,15 @@ public sealed class MmapExtractorService
         _logger.LogInformation("[Mmap] Processing ADT ({TileX},{TileY}) for map {MapName} (id={MapId})",
             tileX, tileY, mapName, mapId);
 
+        // Skip already-built tiles unless this tile has offmesh connections (must always rebuild).
+        bool hasOffmesh = _offMeshConnections.Any(c => c.MapId == (int)mapId && c.TileX == tileX && c.TileY == tileY);
+        string mmtilePath = Path.Combine(_outputDir, $"{mapId:D3}{tileY:D2}{tileX:D2}.mmtile");
+        if (!hasOffmesh && File.Exists(mmtilePath))
+        {
+            _logger.LogInformation("[Mmap] Skipping ADT ({TileX},{TileY}) — file exists and no offmesh", tileX, tileY);
+            return true;
+        }
+
         var geometry = await LoadTileGeometryAsync(mapId, mapName, tileX, tileY, ct);
         if (geometry.Vertices == null || geometry.Vertices.Length == 0 ||
             geometry.Indices == null || geometry.Areas == null)
