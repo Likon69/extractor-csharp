@@ -60,7 +60,11 @@ public sealed class M2Parser
 
         if (nBoundingIndices <= 0 || nBoundingVertices <= 0
             || nBoundingIndices % 3 != 0)
-            return false;
+        {
+            // Valid M2 file but no bounding collision mesh — normal for decorative objects.
+            // Return true with empty arrays so callers can distinguish from "file not found".
+            return true;
+        }
 
         // Bounds check
         if (ofsBoundingVertices + nBoundingVertices * 12 > span.Length)

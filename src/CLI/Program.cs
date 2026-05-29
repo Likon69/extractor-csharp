@@ -99,7 +99,7 @@ public static class Program
                     walkableClimb: 5);
                 string roadDir = Path.Combine(options.OutputPath, "roadmaps");
                 var svc = new MmapExtractorService(archives, _loggerFactory, mmapDir,
-                    recast, options.Threads, options.GoSpawnsPath, offMeshPath: null, roadMapsDir: roadDir);
+                    recast, options.Threads, options.GoSpawnsPath, offMeshPath: options.OffMeshPath, roadMapsDir: roadDir);
                 int tiles = await svc.ExtractMapAsync(mapId, mapName, progress, ct, options.TileX, options.TileY);
                 Console.WriteLine($"  [Mmap] {tiles} tiles extracted.");
                 processed += tiles;
@@ -167,6 +167,10 @@ public static class Program
                 case "--help" or "-h":
                     Help();
                     return null;
+                case "--offmesh":
+                    if (i + 1 >= args.Length) return BadArg("--offmesh requires a value");
+                    opts.OffMeshPath = args[++i];
+                    break;
                 default:
                     return BadArg(args[i]);
             }
@@ -202,6 +206,7 @@ public static class Program
         Console.WriteLine("  --threads <n>       Max threads (default: 4)");
         Console.WriteLine("  --locale <code>     Locale code (default: enUS)");
         Console.WriteLine("  --gospawns <path>   gameobject_spawns.bin path (default: gameobject_spawns.bin)");
+        Console.WriteLine("  --offmesh <path>    OffMesh connections file (offmesh.txt format)");
     }
 
     private sealed class CliOptions
@@ -215,6 +220,7 @@ public static class Program
         public int Threads { get; set; } = 4;
         public string Locale { get; set; } = "enUS";
         public string GoSpawnsPath { get; set; } = "gameobject_spawns.bin";
+        public string? OffMeshPath { get; set; }
     }
 
     private sealed class ConsoleProgress : IProgress<TileProgressEvent>

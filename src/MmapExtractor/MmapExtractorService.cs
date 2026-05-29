@@ -433,7 +433,8 @@ public sealed class MmapExtractorService
             int goCandidateCount = 0;
             int goRasterizedCount = 0;
             int skippedMissingModel = 0;
-            int skippedLoadFail = 0;
+            int skippedFileNotFound = 0;  // model file absent from MPQ — real issue
+            int skippedNoBounds = 0;      // M2 has no bounding mesh — normal for decorative objects
             int skippedTooSmall = 0;
 
             foreach (var go in _goSpawns)
@@ -458,7 +459,12 @@ public sealed class MmapExtractorService
 
                 if (modelData == null)
                 {
-                    skippedLoadFail++;
+                    skippedFileNotFound++;
+                    continue;
+                }
+                if (modelData.Vertices.Length == 0)
+                {
+                    skippedNoBounds++;
                     continue;
                 }
 
@@ -477,9 +483,12 @@ public sealed class MmapExtractorService
             if (goCandidateCount > 0)
             {
                 _logger.LogInformation("[Mmap] ADT ({CX},{CY}): GO candidates={Candidates} rasterized={Rasterized} " +
-                    "skippedMissingModel={Missing} skippedTooSmall={TooSmall} skippedLoadFail={LoadFail}",
+                    "skippedMissingModel={Missing} skippedNoBounds={NoBounds} skippedTooSmall={TooSmall} skippedFileNotFound={NotFound}",
                     centerX, centerY, goCandidateCount, goRasterizedCount,
-                    skippedMissingModel, skippedTooSmall, skippedLoadFail);
+                    skippedMissingModel, skippedNoBounds, skippedTooSmall, skippedFileNotFound);
+                if (skippedFileNotFound > 0)
+                    _logger.LogWarning("[Mmap] ADT ({CX},{CY}): {Count} GO models could not be loaded from MPQ (check model paths)",
+                        centerX, centerY, skippedFileNotFound);
             }
 
             if (goVerts.Count > 0)
@@ -1017,9 +1026,17 @@ public sealed class MmapExtractorService
 
     private GameObjectModelData? LoadGameObjectM2(string modelPath)
     {
-        if (!_m2Parser.TryParseBoundingMesh(modelPath, out float[] mverts, out ushort[] indices)
-            || mverts.Length == 0 || indices.Length == 0)
-            return null;
+        if (!_m2Parser.TryParseBoundingMesh(modelPath, out float[] mverts, out ushort[] indices))
+            return null; // file not found or fundamentally invalid
+
+        if (mverts.Length == 0 || indices.Length == 0)
+        {
+            // Valid M2 but no bounding collision mesh — return empty sentinel so caller
+            // can count it as skippedNoBounds (normal for decorative objects).
+            return new GameObjectModelData(modelPath, IsM2: true,
+                Array.Empty<float>(), Array.Empty<int>(),
+                Vector3.Zero, Vector3.Zero);
+        }
 
         // Apply fixCoords(v) = (v.Z, v.X, v.Y) to match the VMap pipeline:
         // VMapExtractor stores M2 vertices as fixCoords(raw), so TerrainBuilder reads them
