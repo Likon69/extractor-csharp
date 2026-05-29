@@ -11,7 +11,7 @@ namespace MaNGOS.Extractor.Formats.Adt.Models;
 /// </summary>
 public sealed class AdtFile
 {
-    private static readonly ConcurrentDictionary<ushort, ushort> AreaTableLookup = new();
+    private static readonly ConcurrentDictionary<ushort, (uint Flags, uint Team)> AreaTableLookup = new();
     private static readonly ConcurrentDictionary<ushort, byte> LiquidTypeLookup = new();
 
     public static void LoadAreaTable(IArchiveReader archive)
@@ -21,15 +21,16 @@ public sealed class AdtFile
         foreach (var row in reader.Rows)
         {
             ushort areaId = (ushort)row.Id;
-            ushort flags = (ushort)reader.GetUInt32(row, 3); // field 3 = area flags
-            AreaTableLookup[areaId] = flags;
+            uint flags = reader.GetUInt32(row, 4);
+            uint team = reader.GetUInt32(row, 28);
+            AreaTableLookup[areaId] = (flags, team);
         }
     }
 
     public static void LoadLiquidTypeTable(IArchiveReader archive)
     {
         if (!archive.TryReadFile("DBFilesClient\\LiquidType.dbc", out var data)) return;
-        var reader = DbcReader<AreaTableRow>.Parse(data.Span);
+        var reader = DbcReader<LiquidTypeRow>.Parse(data.Span);
         foreach (var row in reader.Rows)
         {
             ushort id = (ushort)row.Id;
@@ -47,15 +48,15 @@ public sealed class AdtFile
 
     public static byte AreaIdToAreaType(ushort areaId)
     {
-        if (!AreaTableLookup.TryGetValue(areaId, out var flags)) return 1;
-        if ((flags & 0x40) != 0) return 2;
-        if ((flags & 0x80) != 0) return 3;
-        if ((flags & 1) != 0) return 1;
-        return 0;
+        // All walkable terrain is NAV_GROUND (1), matching the original MaNGOS extractor.
+        // NAV_HORDE (15) and NAV_ALLIANCE (16) are not standard HonorBuddy area types;
+        // using them breaks cross-tile pathfinding because the viewer's dtQueryFilter
+        // has no defined traversal cost for those area IDs.
+        return 1; // NAV_GROUND
     }
 
-    public static ushort AreaIdToAreaFlags(ushort areaId)
-        => AreaTableLookup.TryGetValue(areaId, out var f) ? f : (ushort)0xFFFF;
+    public static uint AreaIdToAreaFlags(ushort areaId)
+        => AreaTableLookup.TryGetValue(areaId, out var area) ? area.Flags : 0xFFFFFFFFu;
 
     public static LiquidType LiquidTypeToFlags(ushort rawTypeId)
         => LiquidTypeLookup.TryGetValue(rawTypeId, out var f) ? (LiquidType)f : LiquidType.Water;

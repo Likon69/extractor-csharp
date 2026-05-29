@@ -270,7 +270,7 @@ public sealed class MapFileWriter
         var tile = new MapTile(adt.MapId, adt.TileX, adt.TileY)
         {
             // PORT-001: store area flags (not raw IDs) so Recast gets the correct area type
-            AreaMap = adt.GetAllAreaIds().ToArray().Select(id => AdtFile.AreaIdToAreaFlags(id)).ToArray(),
+            AreaMap = adt.GetAllAreaIds().ToArray().Select(id => unchecked((ushort)AdtFile.AreaIdToAreaFlags(id))).ToArray(),
             MinHeight = float.MaxValue,
             MaxHeight = float.MinValue
         };
