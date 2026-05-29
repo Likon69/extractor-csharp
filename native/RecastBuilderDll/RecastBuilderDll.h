@@ -68,4 +68,14 @@ extern "C"
         float startX, float startY, float startZ,
         float endX,   float endY,   float endZ,
         float* outPath, int maxPathPts);
+
+    // Loads two separate mmtile files into a single dtNavMesh so that Detour
+    // resolves the cross-ADT tile links, then runs findStraightPath.
+    // Error codes same as TestPathfinding.
+    RECAST_API int TestPathfindingTwoFiles(
+        const uint8_t* tile1Data, int tile1Size,
+        const uint8_t* tile2Data, int tile2Size,
+        float startX, float startY, float startZ,
+        float endX,   float endY,   float endZ,
+        float* outPath, int maxPathPts);
 }
