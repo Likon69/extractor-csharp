@@ -645,25 +645,29 @@ public sealed class MmapExtractorService
 
         var navData = new byte[]?[WowConstants.SubTilesPerAdtSide * WowConstants.SubTilesPerAdtSide];
 
-        for (int subY = 0; subY < WowConstants.SubTilesPerAdtSide; subY++)
+        int totalSlots = WowConstants.SubTilesPerAdtSide * WowConstants.SubTilesPerAdtSide;
+
+        // Sub-tiles are built sequentially within each ADT worker.
+        // Parallelism is controlled at the outer tile level (Parallel.ForEachAsync);
+        // parallelizing here too would multiply the thread count by itself.
+        for (int slot = 0; slot < totalSlots; slot++)
         {
-            for (int subX = 0; subX < WowConstants.SubTilesPerAdtSide; subX++)
-            {
-                ct.ThrowIfCancellationRequested();
-                int slot = subY * WowConstants.SubTilesPerAdtSide + subX;
-                float minX = adtMinX + subX * WowConstants.SubTileSize;
-                float maxX = minX + WowConstants.SubTileSize;
-                float minZ = adtMinZ + subY * WowConstants.SubTileSize;
-                float maxZ = minZ + WowConstants.SubTileSize;
+            ct.ThrowIfCancellationRequested();
+            int subX = slot % WowConstants.SubTilesPerAdtSide;
+            int subY = slot / WowConstants.SubTilesPerAdtSide;
 
-                int detourTileX = (maxAdtX - adtX) * WowConstants.SubTilesPerAdtSide + subX;
-                int detourTileY = (maxAdtY - adtY) * WowConstants.SubTilesPerAdtSide + subY;
+            float minX = adtMinX + subX * WowConstants.SubTileSize;
+            float maxX = minX + WowConstants.SubTileSize;
+            float minZ = adtMinZ + subY * WowConstants.SubTileSize;
+            float maxZ = minZ + WowConstants.SubTileSize;
 
-                navData[slot] = BuildNavMeshTileSync(
-                    geo, detourTileX, detourTileY,
-                    minX, minZ, maxX, maxZ,
-                    omVerts, omRads, omDirs, omAreas, omFlags);
-            }
+            int detourTileX = (maxAdtX - adtX) * WowConstants.SubTilesPerAdtSide + subX;
+            int detourTileY = (maxAdtY - adtY) * WowConstants.SubTilesPerAdtSide + subY;
+
+            navData[slot] = BuildNavMeshTileSync(
+                geo, detourTileX, detourTileY,
+                minX, minZ, maxX, maxZ,
+                omVerts, omRads, omDirs, omAreas, omFlags);
         }
 
         return navData;
@@ -739,6 +743,7 @@ public sealed class MmapExtractorService
             int outSize;
             int omCount = omVerts.Length / 6;
 
+            _logger.LogInformation("[Mmap] BuildTile DLL call: adt=({AX},{AY}) {Verts}v {Tris}t", adtX, adtY, vertCount, triCount);
             if (!RecastNative.BuildTile(&p, v, vertCount, i, triCount, a,
                 omCount > 0 ? pOmVerts : null,
                 omCount > 0 ? pOmRads  : null,
@@ -751,6 +756,7 @@ public sealed class MmapExtractorService
                 return null;
             }
 
+            _logger.LogInformation("[Mmap] BuildTile DLL returned: adt=({AX},{AY}) size={Size}", adtX, adtY, outSize);
             if (outData == null || outSize <= 0)
             {
                 _logger.LogWarning("[Mmap] BuildTile returned empty for adt=({AX},{AY})", adtX, adtY);
