@@ -4,6 +4,7 @@
         xmlns:vm="clr-namespace:MaNGOS.Extractor.UI.ViewModels"
         xmlns:ctrl="clr-namespace:MaNGOS.Extractor.UI.Controls"
     Title="MaNGOS Extractor - WotLK 3.3.5a"
+    Icon="/Assets/AppIcon.ico"
     Height="700"
     Width="1000"
     Background="{StaticResource WindowBackground}"

@@ -14,6 +14,7 @@ using MaNGOS.Extractor.Core.Models;
 using MaNGOS.Extractor.Formats.Adt.Models;
 using MaNGOS.Extractor.Formats.Dbc;
 using MaNGOS.Extractor.Formats.Mpq;
+using MaNGOS.Extractor.Formats.Wdt;
 using MaNGOS.Extractor.MapExtractor;
 using MaNGOS.Extractor.MmapExtractor;
 using MaNGOS.Extractor.RoadExtractor;
@@ -448,15 +449,32 @@ public sealed class MainViewModel : INotifyPropertyChanged
             AdtFile.LoadAreaTable(_archives);
             AdtFile.LoadLiquidTypeTable(_archives);
 
-            var progress = new Progress<TileProgressEvent>(e => _tileGrid.OnTileProgress(e));
             AddLog($"Starting extraction: {maps.Count} maps, {enabledPhases.Count} phases, {ThreadCount} threads");
             int? onlyTileX = SingleTileEnabled ? SingleTileX : null;
             int? onlyTileY = SingleTileEnabled ? SingleTileY : null;
 
-            int processed = 0;
+            TotalTiles = await ComputeTotalTilesAsync(maps, enabledPhases.Count, onlyTileX, onlyTileY, _cts.Token);
+            ProcessedTiles = 0;
+            Progress = 0;
 
-            // Estimate total tiles for progress (rough: each map has at most 4096 tiles)
-            TotalTiles = maps.Sum(m => Math.Max(1, 4096 / maps.Count)) * enabledPhases.Count;
+            var completedTiles = new HashSet<long>();
+            var progress = new Progress<TileProgressEvent>(e =>
+            {
+                _tileGrid.OnTileProgress(e);
+
+                if (e.Status is not (TileStatus.Done or TileStatus.Failed))
+                    return;
+
+                if (!completedTiles.Add(CreateTileKey(e.MapId, e.TileX, e.TileY, e.Phase)))
+                    return;
+
+                ProcessedTiles = completedTiles.Count;
+                Progress = TotalTiles > 0
+                    ? Math.Min(100.0, ProcessedTiles * 100.0 / TotalTiles)
+                    : 0;
+            });
+
+            int successfulTiles = 0;
 
             if (enabledPhases.Contains("Vmap"))
             {
@@ -479,27 +497,21 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     AddLog($"[Map] Extracting {mapName}...");
                     int tiles = await new MapExtractorService(_archives, _loggerFactory, mapDir)
                         .ExtractMapAsync((uint)map.MapId, mapName, progress, _cts.Token, onlyTileX, onlyTileY);
-                    processed += tiles;
-                    ProcessedTiles = processed;
-                    Progress = TotalTiles > 0 ? processed * 100.0 / TotalTiles : 0;
+                    successfulTiles += tiles;
                 }
                 if (enabledPhases.Contains("Vmap"))
                 {
                     AddLog($"[Vmap] Extracting {mapName}...");
                     int tiles = await new VmapExtractorService(_archives, _loggerFactory, vmapDir)
                         .ExtractMapAsync((uint)map.MapId, mapName, progress, _cts.Token, onlyTileX, onlyTileY);
-                    processed += tiles;
-                    ProcessedTiles = processed;
-                    Progress = TotalTiles > 0 ? processed * 100.0 / TotalTiles : 0;
+                    successfulTiles += tiles;
                 }
                 if (enabledPhases.Contains("Road"))
                 {
                     AddLog($"[Road] Extracting {mapName}...");
                     int tiles = await new RoadExtractorService(_archives, _loggerFactory, roadDir)
                         .ExtractMapAsync((uint)map.MapId, mapName, progress, _cts.Token, onlyTileX, onlyTileY);
-                    processed += tiles;
-                    ProcessedTiles = processed;
-                    Progress = TotalTiles > 0 ? processed * 100.0 / TotalTiles : 0;
+                    successfulTiles += tiles;
                 }
                 if (enabledPhases.Contains("Mmap"))
                 {
@@ -507,14 +519,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     var recastConfig = new RecastConfig(CellSize, CellHeight, WalkableSlopeAngle, WalkableHeight, WalkableRadius, WalkableClimb);
                     int tiles = await new MmapExtractorService(_archives, _loggerFactory, mmapDir, recastConfig, ThreadCount, GoSpawnsPath, OffMeshPath, roadDir)
                         .ExtractMapAsync((uint)map.MapId, mapName, progress, _cts.Token, onlyTileX, onlyTileY);
-                    processed += tiles;
-                    ProcessedTiles = processed;
-                    Progress = TotalTiles > 0 ? processed * 100.0 / TotalTiles : 0;
+                    successfulTiles += tiles;
                 }
             }
-            Progress = 100;
+            if (TotalTiles > 0 && ProcessedTiles >= TotalTiles)
+                Progress = 100;
 
-            AddLog($"Extraction complete. {processed} tiles processed.");
+            AddLog($"Extraction complete. {successfulTiles} tiles successful, {ProcessedTiles}/{TotalTiles} tiles finalized.");
         }
         catch (OperationCanceledException)
         {
@@ -576,6 +587,45 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private void OnPropertyChanged([CallerMemberName] string? name = null)
         => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+
+    private async Task<int> ComputeTotalTilesAsync(
+        List<MapSelectionItem> maps,
+        int enabledPhaseCount,
+        int? onlyTileX,
+        int? onlyTileY,
+        CancellationToken ct)
+    {
+        if (_archives == null || enabledPhaseCount <= 0 || maps.Count == 0)
+            return 0;
+
+        int perPhaseTotal = 0;
+        var wdt = new WdtReader(_archives);
+
+        foreach (var map in maps)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            if (!await wdt.LoadAsync(map.Name, ct))
+            {
+                AddLog($"[Progress] WDT introuvable pour {map.Name}; total ignoré pour cette map.", LogLevel.Warning);
+                continue;
+            }
+
+            var tiles = wdt.GetExistingTiles();
+            if (onlyTileX.HasValue && onlyTileY.HasValue)
+                perPhaseTotal += tiles.Count(t => t.X == onlyTileX.Value && t.Y == onlyTileY.Value);
+            else
+                perPhaseTotal += tiles.Count;
+        }
+
+        return perPhaseTotal * enabledPhaseCount;
+    }
+
+    private static long CreateTileKey(int mapId, int tileX, int tileY, ExtractionPhase phase)
+    {
+        // mapId(12 bits) | tileX(6 bits) | tileY(6 bits) | phase(4 bits)
+        return ((long)mapId << 16) | ((long)tileX << 10) | ((long)tileY << 4) | (long)phase;
+    }
 }
 
 public sealed class PhaseItem : INotifyPropertyChanged
