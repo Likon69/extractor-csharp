@@ -34,6 +34,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private HashSet<int>? _savedMapIds;   // restored from config on startup
     private bool _suppressMapSelectionChanged;
     private bool _isLoadingConfig;
+    private CancellationTokenSource? _metricsCts;
+    private Task? _metricsTask;
+    private DateTime _totalStartUtc;
+    private DateTime _mapStartUtc;
+    private int _currentMapId = -1;
+    private int _currentMapProcessedTiles;
+    private int _currentMapTotalTiles;
+    private Dictionary<int, int> _mapTileCountByMapId = new();
 
     // Window geometry (persisted)
     public double WindowLeft   { get; set; } = double.NaN;
@@ -106,6 +114,43 @@ public sealed class MainViewModel : INotifyPropertyChanged
         get => _progress;
         private set { _progress = value; OnPropertyChanged(); }
     }
+
+    private string _etaTotal = "--:--:--";
+    public string EtaTotal
+    {
+        get => _etaTotal;
+        private set { _etaTotal = value; OnPropertyChanged(); }
+    }
+
+    private string _etaCurrentMap = "--:--:--";
+    public string EtaCurrentMap
+    {
+        get => _etaCurrentMap;
+        private set { _etaCurrentMap = value; OnPropertyChanged(); }
+    }
+
+    private string _generatedSizeText = "0.00 MB";
+    public string GeneratedSizeText
+    {
+        get => _generatedSizeText;
+        private set { _generatedSizeText = value; OnPropertyChanged(); }
+    }
+
+    public string[] LogFilters => new[] { "All", "Info", "Warning", "Error" };
+
+    private string _selectedLogFilter = "All";
+    public string SelectedLogFilter
+    {
+        get => _selectedLogFilter;
+        set
+        {
+            if (_selectedLogFilter == value)
+                return;
+            _selectedLogFilter = value;
+            OnPropertyChanged();
+        }
+    }
+
     public string StatusMessage { get; private set; } = "Ready";
 
     public ObservableCollection<PhaseItem> Phases { get; } = new()
@@ -453,9 +498,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
             int? onlyTileX = SingleTileEnabled ? SingleTileX : null;
             int? onlyTileY = SingleTileEnabled ? SingleTileY : null;
 
-            TotalTiles = await ComputeTotalTilesAsync(maps, enabledPhases.Count, onlyTileX, onlyTileY, _cts.Token);
+            _totalStartUtc = DateTime.UtcNow;
+            _mapStartUtc = _totalStartUtc;
+
+            _mapTileCountByMapId = await ComputeTileCountsByMapAsync(maps, enabledPhases.Count, onlyTileX, onlyTileY, _cts.Token);
+            TotalTiles = _mapTileCountByMapId.Values.Sum();
             ProcessedTiles = 0;
             Progress = 0;
+            EtaTotal = "--:--:--";
+            EtaCurrentMap = "--:--:--";
+
+            _metricsCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+            _metricsTask = RunOutputMetricsLoopAsync(_metricsCts.Token);
 
             var completedTiles = new HashSet<long>();
             var progress = new Progress<TileProgressEvent>(e =>
@@ -469,9 +523,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     return;
 
                 ProcessedTiles = completedTiles.Count;
+                if (e.MapId == _currentMapId)
+                    _currentMapProcessedTiles++;
+
                 Progress = TotalTiles > 0
                     ? Math.Min(100.0, ProcessedTiles * 100.0 / TotalTiles)
                     : 0;
+                UpdateEtaValues();
             });
 
             int successfulTiles = 0;
@@ -488,6 +546,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
             {
                 _cts.Token.ThrowIfCancellationRequested();
                 string mapName = map.Name;
+                _currentMapId = map.MapId;
+                _currentMapProcessedTiles = 0;
+                _currentMapTotalTiles = _mapTileCountByMapId.TryGetValue(map.MapId, out var mapTotal) ? mapTotal : 0;
+                _mapStartUtc = DateTime.UtcNow;
+                UpdateEtaValues();
 
                 // Update the tile grid to show this map's progress.
                 _tileGrid.SetCurrentMap(map.MapId, mapName);
@@ -525,6 +588,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             if (TotalTiles > 0 && ProcessedTiles >= TotalTiles)
                 Progress = 100;
 
+            EtaTotal = "00:00:00";
+            EtaCurrentMap = "00:00:00";
+
             AddLog($"Extraction complete. {successfulTiles} tiles successful, {ProcessedTiles}/{TotalTiles} tiles finalized.");
         }
         catch (OperationCanceledException)
@@ -539,6 +605,21 @@ public sealed class MainViewModel : INotifyPropertyChanged
         finally
         {
             IsExtracting = false;
+
+            if (_metricsCts != null)
+            {
+                _metricsCts.Cancel();
+                _metricsCts.Dispose();
+                _metricsCts = null;
+            }
+
+            if (_metricsTask != null)
+            {
+                try { await _metricsTask; }
+                catch (OperationCanceledException) { }
+                _metricsTask = null;
+            }
+
             _archives?.Dispose();
             _archives = null;
         }
@@ -588,7 +669,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private void OnPropertyChanged([CallerMemberName] string? name = null)
         => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 
-    private async Task<int> ComputeTotalTilesAsync(
+    private async Task<Dictionary<int, int>> ComputeTileCountsByMapAsync(
         List<MapSelectionItem> maps,
         int enabledPhaseCount,
         int? onlyTileX,
@@ -596,10 +677,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
         CancellationToken ct)
     {
         if (_archives == null || enabledPhaseCount <= 0 || maps.Count == 0)
-            return 0;
+            return new Dictionary<int, int>();
 
-        int perPhaseTotal = 0;
         var wdt = new WdtReader(_archives);
+        var result = new Dictionary<int, int>(maps.Count);
 
         foreach (var map in maps)
         {
@@ -608,17 +689,105 @@ public sealed class MainViewModel : INotifyPropertyChanged
             if (!await wdt.LoadAsync(map.Name, ct))
             {
                 AddLog($"[Progress] WDT introuvable pour {map.Name}; total ignoré pour cette map.", LogLevel.Warning);
+                result[map.MapId] = 0;
                 continue;
             }
 
             var tiles = wdt.GetExistingTiles();
+            int perPhaseCount;
             if (onlyTileX.HasValue && onlyTileY.HasValue)
-                perPhaseTotal += tiles.Count(t => t.X == onlyTileX.Value && t.Y == onlyTileY.Value);
+                perPhaseCount = tiles.Count(t => t.X == onlyTileX.Value && t.Y == onlyTileY.Value);
             else
-                perPhaseTotal += tiles.Count;
+                perPhaseCount = tiles.Count;
+
+            result[map.MapId] = perPhaseCount * enabledPhaseCount;
         }
 
-        return perPhaseTotal * enabledPhaseCount;
+        return result;
+    }
+
+    private async Task RunOutputMetricsLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                long bytes = GetDirectorySizeSafe(OutputPath);
+                GeneratedSizeText = $"{bytes / (1024d * 1024d):F2} MB";
+            }
+            catch
+            {
+                // Ignore transient IO errors while files are being written.
+            }
+
+            await Task.Delay(1000, ct);
+        }
+    }
+
+    private static long GetDirectorySizeSafe(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
+            return 0;
+
+        long total = 0;
+        var opts = new EnumerationOptions
+        {
+            RecurseSubdirectories = true,
+            IgnoreInaccessible = true
+        };
+
+        foreach (var file in Directory.EnumerateFiles(path, "*", opts))
+        {
+            try
+            {
+                total += new FileInfo(file).Length;
+            }
+            catch
+            {
+                // File can disappear between enumerate/read during extraction.
+            }
+        }
+
+        return total;
+    }
+
+    private void UpdateEtaValues()
+    {
+        EtaTotal = ComputeEta(_totalStartUtc, ProcessedTiles, TotalTiles);
+        EtaCurrentMap = ComputeEta(_mapStartUtc, _currentMapProcessedTiles, _currentMapTotalTiles);
+    }
+
+    private static string ComputeEta(DateTime startedUtc, int done, int total)
+    {
+        if (total <= 0)
+            return "--:--:--";
+        if (done >= total)
+            return "00:00:00";
+
+        double elapsedSeconds = Math.Max(0.0, (DateTime.UtcNow - startedUtc).TotalSeconds);
+        if (done <= 0 || elapsedSeconds < 1.0)
+            return "--:--:--";
+
+        double rate = done / elapsedSeconds;
+        if (rate <= 0)
+            return "--:--:--";
+
+        double remainingSeconds = (total - done) / rate;
+        if (double.IsNaN(remainingSeconds) || double.IsInfinity(remainingSeconds) || remainingSeconds < 0)
+            return "--:--:--";
+
+        return TimeSpan.FromSeconds(remainingSeconds).ToString(@"hh\:mm\:ss");
+    }
+
+    public bool ShouldDisplayLog(Mel.LogLevel level)
+    {
+        return SelectedLogFilter switch
+        {
+            "Info" => level == Mel.LogLevel.Information,
+            "Warning" => level == Mel.LogLevel.Warning,
+            "Error" => level == Mel.LogLevel.Error || level == Mel.LogLevel.Critical,
+            _ => true
+        };
     }
 
     private static long CreateTileKey(int mapId, int tileX, int tileY, ExtractionPhase phase)

@@ -39,16 +39,30 @@ public partial class MainWindow : Window
             if (vm.WindowWidth  > 200)          Width  = vm.WindowWidth;
             if (vm.WindowHeight > 200)          Height = vm.WindowHeight;
 
-            vm.LogMessages.CollectionChanged += (_, _) =>
-                Dispatcher.InvokeAsync(() =>
+            void RenderLogs()
+            {
+                if (_logTextBox == null) return;
+
+                var sb = new StringBuilder();
+                foreach (var msg in vm.LogMessages)
                 {
-                    if (_logTextBox == null) return;
-                    var sb = new StringBuilder();
-                    foreach (var msg in vm.LogMessages)
-                        sb.AppendLine(msg.Text);
-                    _logTextBox.Text = sb.ToString();
-                    _logTextBox.ScrollToEnd();
-                });
+                    if (!vm.ShouldDisplayLog(msg.Level))
+                        continue;
+                    sb.AppendLine(msg.Text);
+                }
+
+                _logTextBox.Text = sb.ToString();
+                _logTextBox.ScrollToEnd();
+            }
+
+            vm.LogMessages.CollectionChanged += (_, _) => Dispatcher.InvokeAsync(RenderLogs);
+            vm.PropertyChanged += (_, args) =>
+            {
+                if (args.PropertyName == nameof(ViewModels.MainViewModel.SelectedLogFilter))
+                    Dispatcher.InvokeAsync(RenderLogs);
+            };
+
+            Dispatcher.InvokeAsync(RenderLogs);
         }
     }
 

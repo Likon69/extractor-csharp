@@ -209,18 +209,33 @@
 
                 <!-- Log output (selectable + copyable, resizable) -->
                 <Border Grid.Row="2" Background="#1E1E1E">
-                    <TextBox x:Name="LogTextBox"
-                             IsReadOnly="True"
-                             Background="Transparent"
-                             Foreground="#D4D4D4"
-                             BorderThickness="0"
-                             FontFamily="Consolas"
-                             FontSize="11"
-                             Padding="8"
-                             VerticalScrollBarVisibility="Auto"
-                             HorizontalScrollBarVisibility="Disabled"
-                             TextWrapping="Wrap"
-                             IsReadOnlyCaretVisible="False"/>
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+
+                        <DockPanel Grid.Row="0" Margin="8,6,8,4" LastChildFill="False">
+                            <TextBlock Text="Log filter:" VerticalAlignment="Center" Foreground="#A8A8A8" Margin="0,0,8,0"/>
+                            <ComboBox Width="120"
+                                      ItemsSource="{Binding LogFilters}"
+                                      SelectedItem="{Binding SelectedLogFilter, Mode=TwoWay}"/>
+                        </DockPanel>
+
+                        <TextBox Grid.Row="1"
+                                 x:Name="LogTextBox"
+                                 IsReadOnly="True"
+                                 Background="Transparent"
+                                 Foreground="#D4D4D4"
+                                 BorderThickness="0"
+                                 FontFamily="Consolas"
+                                 FontSize="11"
+                                 Padding="8"
+                                 VerticalScrollBarVisibility="Auto"
+                                 HorizontalScrollBarVisibility="Disabled"
+                                 TextWrapping="Wrap"
+                                 IsReadOnlyCaretVisible="False"/>
+                    </Grid>
                 </Border>
             </Grid>
         </Grid>
@@ -230,6 +245,7 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <ProgressBar Grid.Column="0" Value="{Binding Progress, Mode=OneWay}" Maximum="100" Height="20"/>
             <TextBlock Grid.Column="1" Margin="8,0,0,0">
@@ -238,6 +254,18 @@
                 <Run Text="{Binding TotalTiles, Mode=OneWay}"/>
                 <Run Text=" tiles"/>
             </TextBlock>
+            <StackPanel Grid.Column="2" Margin="12,0,0,0" VerticalAlignment="Center">
+                <TextBlock FontSize="11" Foreground="#A8A8A8">
+                    <Run Text="ETA map: "/>
+                    <Run Text="{Binding EtaCurrentMap, Mode=OneWay}"/>
+                    <Run Text=" | total: "/>
+                    <Run Text="{Binding EtaTotal, Mode=OneWay}"/>
+                </TextBlock>
+                <TextBlock FontSize="11" Foreground="#A8A8A8">
+                    <Run Text="Generated: "/>
+                    <Run Text="{Binding GeneratedSizeText, Mode=OneWay}"/>
+                </TextBlock>
+            </StackPanel>
         </Grid>
     </Grid>
 </Window>
