@@ -235,7 +235,7 @@ public sealed class AdtParser
         {
             if (i < mcinEntries.Length && mcinEntries[i].Offset > 0)
             {
-                chunkTextureIds[i] = ParseMcnkPrimaryTexture(reader, (int)mcinEntries[i].Offset);
+                chunkTextureIds[i] = ParseMcnkRoadOrPrimaryTexture(reader, (int)mcinEntries[i].Offset, textures);
             }
         }
 
@@ -308,7 +308,7 @@ public sealed class AdtParser
         return liquid;
     }
 
-    private uint ParseMcnkPrimaryTexture(SpanReader reader, int mcnkOffset)
+    private uint ParseMcnkRoadOrPrimaryTexture(SpanReader reader, int mcnkOffset, string[] textures)
     {
         int savedPos = reader.Position;
         reader.Seek(mcnkOffset);
@@ -320,21 +320,48 @@ public sealed class AdtParser
             return 0;
         }
         reader.Skip(4);  // skip MCNK size
-        // ofsLayer is at MCNK data offset 0x1C = 28 bytes from data start
-        // fields before it: flags(4)+ix(4)+iy(4)+nLayers(4)+nDoodadRefs(4)+ofsHeight(4)+ofsNormal(4) = 28 bytes
-        reader.Skip(28); // skip to ofsLayer
-        uint mclyOffset = reader.ReadUInt32(); // reads ofsLayer at 0x1C ✓
+        reader.Skip(12); // flags + ix + iy
+        uint nLayers = reader.ReadUInt32();
+        reader.Skip(12); // nDoodadRefs + ofsHeight + ofsNormal
+        uint mclyOffset = reader.ReadUInt32();
         reader.Seek(savedPos);
 
         if (mclyOffset == 0)
             return 0;
 
-        // MCLY: entries of 16 bytes [textureId, flags, alphaOffset, effectId], no count field.
+        // MCLY entries are 16 bytes: textureId, flags, alphaOffset, effectId.
         reader.Seek(mcnkOffset + (int)mclyOffset + 8); // skip MCLY magic + size
-        uint primaryTextureId = reader.ReadUInt32(); // layer 0 textureId
+        uint primaryTextureId = 0;
+        uint roadTextureId = 0;
+        bool hasRoadTexture = false;
+
+        for (uint layer = 0; layer < nLayers; layer++)
+        {
+            uint textureId = reader.ReadUInt32();
+            if (layer == 0)
+                primaryTextureId = textureId;
+
+            if (textureId < textures.Length && IsRoadTexture(textures[(int)textureId]))
+            {
+                roadTextureId = textureId;
+                hasRoadTexture = true;
+            }
+
+            reader.Skip(12); // flags + alphaOffset + effectId
+        }
 
         reader.Seek(savedPos);
-        return primaryTextureId;
+        return hasRoadTexture ? roadTextureId : primaryTextureId;
+    }
+
+    private static bool IsRoadTexture(string textureName)
+    {
+        if (string.IsNullOrEmpty(textureName))
+            return false;
+
+        string lower = textureName.ToLowerInvariant();
+        return lower.Contains("road") || lower.Contains("cobblestone")
+            || lower.Contains("path_stone") || lower.Contains("bridgefloor");
     }
 
     private AdtMcin[] ParseMcin(SpanReader reader, uint offset)

@@ -716,11 +716,23 @@ public sealed class MmapExtractorService
         float expandedMinZ = minZ - borderMeters;
         float expandedMaxZ = maxZ + borderMeters;
 
+        // Compute Y bounds from vertices inside the sub-tile's expanded XZ bbox
+        // (sub-tile + border). Vertices from far-away ADTs in the 3x3 neighborhood
+        // (e.g. mountain peaks at Y≈1300 vs local terrain at Y≈-400) would otherwise
+        // inflate the heightfield Y range, and rcFilterLedgeSpans would strip the
+        // high spans as ledges because their neighbor spans sit ~1700 units below —
+        // far more than walkableClimb cells.
         float minY = float.MaxValue, maxYh = float.MinValue;
-        for (int v = 1; v < geo.Vertices.Length; v += 3)
+        for (int v = 0; v < geo.Vertices.Length; v += 3)
         {
-            if (geo.Vertices[v] < minY) minY = geo.Vertices[v];
-            if (geo.Vertices[v] > maxYh) maxYh = geo.Vertices[v];
+            float vx = geo.Vertices[v];
+            float vy = geo.Vertices[v + 1];
+            float vz = geo.Vertices[v + 2];
+            if (vx < expandedMinX || vx > expandedMaxX ||
+                vz < expandedMinZ || vz > expandedMaxZ)
+                continue;
+            if (vy < minY) minY = vy;
+            if (vy > maxYh) maxYh = vy;
         }
         if (minY == float.MaxValue) { minY = 0; maxYh = 100f; }
 

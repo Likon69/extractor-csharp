@@ -142,11 +142,17 @@
 571 22,24 (4183.19 5281.41 27.59) (4184.28 5281.59 69.48) 3.0 6 1
 571 22,24 (4184.28 5281.59 69.48) (4183.19 5281.41 27.59) 3.0 6 1
 
-# Map 571 - Northrend: Storm Peaks elevator (near K3/Ulduar)
-# GO 152614 at (2892.18, 6236.34, 208.91)
-# FIXED: was 26,20 — correct tile is 20,26
-571 20,26 (2892.18 6236.34 183.00) (2892.18 6236.34 208.91) 3.0 6 1
-571 20,26 (2892.18 6236.34 208.91) (2892.18 6236.34 183.00) 3.0 6 1
+# Map 571 - Northrend: Borean Tundra elevator (Horde side, near Warsong Hold)
+# FIXED: was Storm Peaks label with copy-paste X,Y on both ends + wrong bottom Z
+571 20,26 (2877.8818 6223.361 105.379326) (2891.7466 6236.0654 208.90811) 3.0 6 1
+571 20,26 (2891.7466 6236.0654 208.90811) (2877.8818 6223.361 105.379326) 3.0 6 1
+
+# Map 0 - Eastern Kingdoms: Human starting zone — blocked cave passage
+# Poly #5332 (Ground) → Poly #6739 (Ground), straight 10.1 yd
+# Tunnel (areaType 1, bidirectional). Radius 2.0 matches Durotar Valley of Trials tunnel.
+# NOTE: X coords are NEGATIVE in Stormwind (WoW coordinate system) — sign dropped in bot's log output
+0 32,48 (-8679.297 -118.103935 90.97482) (-8653.302 -128.09535 88.88147) 5.0 1 1
+0 32,48 (-8653.302 -128.09535 88.88147) (-8679.297 -118.103935 90.97482) 5.0 1 1
 
 # Map 609 - Acherus: The Ebon Hold (DK starting zone)
 # Portal pair: Doodad_Nox_portal_purpl (entries 191538/191539)
