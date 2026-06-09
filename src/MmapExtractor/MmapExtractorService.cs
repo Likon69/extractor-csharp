@@ -636,6 +636,51 @@ public sealed class MmapExtractorService
             .Where(c => c.MapId == (int)mapId && c.TileX == adtX && c.TileY == adtY)
             .ToArray();
 
+        // ----------------------------------------------------------------------
+        // Compute a single Y range for the WHOLE ADT (not per sub-tile).
+        //
+        // This mirrors the original Mangos MapBuilder.cpp behavior: the full ADT
+        // Y range is passed unchanged to every mini-tile's heightfield:
+        //
+        //     rcVcopy(config.bmin, bmin);
+        //     rcVcopy(config.bmax, bmax);
+        //     // per-tile config only touches X/Z; bmin[1]/bmax[1] stay global
+        //
+        // Why this matters for the 4x4 sub-tile architecture: at cave entrances
+        // or other vertical drops, the mountain-top and the cave floor can be
+        // ~hundreds of world units apart. If each sub-tile recomputes its Y
+        // range from vertices in its own (sub-tile + border) XZ bbox, a sub-tile
+        // sitting on the mountain top gets a Y range that does NOT include the
+        // cave floor. The cave-floor span rasterized in the border is then
+        // dropped by rcCreateHeightfield (its Y is outside [bmin[1], bmax[1]]).
+        // Detour then links the mountain-top span in the neighbor sub-tile to
+        // nothing at the cave-floor level — the portal goes "up" instead of
+        // "down", which is the bug the user is seeing.
+        //
+        // rcFilterLedgeSpans is NOT a concern with the full-ADT Y range: it only
+        // marks the HIGHER span of a ledge pair as unwalkable, never the lower
+        // one. And the spans it inspects are still the spans in the sub-tile's
+        // XZ cells — a larger Y range just gives the sparse heightfield more
+        // headroom to store them.
+        // ----------------------------------------------------------------------
+        float adtMaxX = adtMinX + WowConstants.TileSize;
+        float adtMaxZ = adtMinZ + WowConstants.TileSize;
+        float adtMinY = float.MaxValue, adtMaxY = float.MinValue;
+        for (int v = 0; v < geo.Vertices.Length; v += 3)
+        {
+            float vx = geo.Vertices[v];
+            float vy = geo.Vertices[v + 1];
+            float vz = geo.Vertices[v + 2];
+            if (vx < adtMinX || vx > adtMaxX || vz < adtMinZ || vz > adtMaxZ)
+                continue;
+            if (vy < adtMinY) adtMinY = vy;
+            if (vy > adtMaxY) adtMaxY = vy;
+        }
+        if (adtMinY == float.MaxValue) { adtMinY = 0; adtMaxY = 100f; }
+
+        _logger.LogInformation("[Mmap] ADT ({AdtX},{AdtY}) global Y range: [{MinY:F2}, {MaxY:F2}] (from {Verts} verts in ADT bbox)",
+            adtX, adtY, adtMinY, adtMaxY, geo.Vertices.Length / 3);
+
         float[] omVerts  = tileConns.Length > 0 ? new float[tileConns.Length * 6]  : Array.Empty<float>();
         float[] omRads   = tileConns.Length > 0 ? new float[tileConns.Length]       : Array.Empty<float>();
         byte[]  omDirs   = tileConns.Length > 0 ? new byte[tileConns.Length]        : Array.Empty<byte>();
@@ -680,6 +725,7 @@ public sealed class MmapExtractorService
             navData[slot] = BuildNavMeshTileSync(
                 geo, detourTileX, detourTileY,
                 minX, minZ, maxX, maxZ,
+                adtMinY, adtMaxY,
                 omVerts, omRads, omDirs, omAreas, omFlags);
         }
 
@@ -689,6 +735,7 @@ public sealed class MmapExtractorService
     private unsafe byte[]? BuildNavMeshTileSync(
         TileGeometry geo, int detourTileX, int detourTileY,
         float minX, float minZ, float maxX, float maxZ,
+        float adtMinY, float adtMaxY,
         float[] omVerts, float[] omRads, byte[] omDirs, byte[] omAreas, ushort[] omFlags)
     {
         int vertCount = geo.VertexCount;
@@ -720,25 +767,26 @@ public sealed class MmapExtractorService
         float expandedMinZ = minZ - borderMeters;
         float expandedMaxZ = maxZ + borderMeters;
 
-        // Compute Y bounds from vertices inside the sub-tile's expanded XZ bbox
-        // (sub-tile + border). Vertices from far-away ADTs in the 3x3 neighborhood
-        // (e.g. mountain peaks at Y≈1300 vs local terrain at Y≈-400) would otherwise
-        // inflate the heightfield Y range, and rcFilterLedgeSpans would strip the
-        // high spans as ledges because their neighbor spans sit ~1700 units below —
-        // far more than walkableClimb cells.
-        float minY = float.MaxValue, maxYh = float.MinValue;
-        for (int v = 0; v < geo.Vertices.Length; v += 3)
-        {
-            float vx = geo.Vertices[v];
-            float vy = geo.Vertices[v + 1];
-            float vz = geo.Vertices[v + 2];
-            if (vx < expandedMinX || vx > expandedMaxX ||
-                vz < expandedMinZ || vz > expandedMaxZ)
-                continue;
-            if (vy < minY) minY = vy;
-            if (vy > maxYh) maxYh = vy;
-        }
-        if (minY == float.MaxValue) { minY = 0; maxYh = 100f; }
+        // Use the ADT-wide Y range passed by BuildNavMeshSubTilesSync — this is
+        // the FIX for cave entrances / vertical drops at sub-tile boundaries.
+        //
+        // Original (buggy): each sub-tile recomputed its Y range from vertices in
+        // its own (sub-tile + border) XZ bbox. A sub-tile sitting on a mountain
+        // top above a cave entrance would get a Y range that does NOT include the
+        // cave floor (which lives in a different sub-tile). The cave-floor span
+        // rasterized inside the border was then silently dropped by
+        // rcCreateHeightfield (its Y is outside the local Y range), and Detour
+        // linked the mountain-top span of the neighbor sub-tile to nothing at
+        // the cave-floor level — producing the "connects on top instead of
+        // bottom" artefact.
+        //
+        // Fixed: use the full ADT Y range for every sub-tile, matching the
+        // original Mangos MapBuilder.cpp behavior. This is safe because
+        // rcFilterLedgeSpans only ever marks the HIGHER span of a ledge pair as
+        // unwalkable, and a wider Y range only gives the sparse heightfield
+        // more headroom — it does not change which spans exist in each cell.
+        float minY = adtMinY;
+        float maxYh = adtMaxY;
 
         fixed (float* v = geo.Vertices)
         fixed (int* i = geo.Indices)
