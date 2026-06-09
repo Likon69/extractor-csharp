@@ -673,6 +673,10 @@ public sealed class MmapExtractorService
             int detourTileX = (maxAdtX - adtX) * WowConstants.SubTilesPerAdtSide + subX;
             int detourTileY = (maxAdtY - adtY) * WowConstants.SubTilesPerAdtSide + subY;
 
+            // TEMP-LOG: sub-tile bbox for portal-boundary diagnosis
+            _logger.LogInformation("[Mmap-SubTile] adt=({AdtX},{AdtY}) slot={Slot} subX={SX} subY={SY} minX={MinX:F3} maxX={MaxX:F3} minZ={MinZ:F3} maxZ={MaxZ:F3}",
+                adtX, adtY, slot, subX, subY, minX, maxX, minZ, maxZ);
+
             navData[slot] = BuildNavMeshTileSync(
                 geo, detourTileX, detourTileY,
                 minX, minZ, maxX, maxZ,
@@ -683,7 +687,7 @@ public sealed class MmapExtractorService
     }
 
     private unsafe byte[]? BuildNavMeshTileSync(
-        TileGeometry geo, int adtX, int adtY,
+        TileGeometry geo, int detourTileX, int detourTileY,
         float minX, float minZ, float maxX, float maxZ,
         float[] omVerts, float[] omRads, byte[] omDirs, byte[] omAreas, ushort[] omFlags)
     {
@@ -701,8 +705,8 @@ public sealed class MmapExtractorService
             MinRegionArea = 400,
             MergeRegionArea = 1600,
             MaxSimplificationError = 1.3f,
-            TileX = adtX,
-            TileY = adtY,
+            TileX = detourTileX,
+            TileY = detourTileY,
             MaxVertsPerPoly = 6,
             BorderSize = _recastConfig.WalkableRadius + 3
         };
@@ -755,7 +759,7 @@ public sealed class MmapExtractorService
             _logger.LogDebug("[Mmap] RecastBuildParams: adt=({AX},{AY}) " +
                 "bbox=[{MinX:F2},{MinY:F2},{MinZ:F2}]→[{MaxX:F2},{MaxY:F2},{MaxZ:F2}] " +
                 "cellSize={CS:F6} cellHeight={CH:F3} input: {Verts} verts {Tris} tris {OmCount} offmesh",
-                adtX, adtY,
+                detourTileX, detourTileY,
                 p.BoundingBoxMinX, p.BoundingBoxMinY, p.BoundingBoxMinZ,
                 p.BoundingBoxMaxX, p.BoundingBoxMaxY, p.BoundingBoxMaxZ,
                 p.CellSize, p.CellHeight, vertCount, triCount, omVerts.Length / 6);
@@ -764,7 +768,7 @@ public sealed class MmapExtractorService
             int outSize;
             int omCount = omVerts.Length / 6;
 
-            _logger.LogInformation("[Mmap] BuildTile DLL call: adt=({AX},{AY}) {Verts}v {Tris}t", adtX, adtY, vertCount, triCount);
+            _logger.LogInformation("[Mmap] BuildTile DLL call: adt=({AX},{AY}) {Verts}v {Tris}t", detourTileX, detourTileY, vertCount, triCount);
             if (!RecastNative.BuildTile(&p, v, vertCount, i, triCount, a,
                 omCount > 0 ? pOmVerts : null,
                 omCount > 0 ? pOmRads  : null,
@@ -773,14 +777,14 @@ public sealed class MmapExtractorService
                 omCount > 0 ? pOmFlags : null,
                 omCount, &outData, &outSize))
             {
-                _logger.LogWarning("[Mmap] BuildTile FAILED for adt=({AX},{AY})", adtX, adtY);
+                _logger.LogWarning("[Mmap] BuildTile FAILED for adt=({AX},{AY})", detourTileX, detourTileY);
                 return null;
             }
 
-            _logger.LogInformation("[Mmap] BuildTile DLL returned: adt=({AX},{AY}) size={Size}", adtX, adtY, outSize);
+            _logger.LogInformation("[Mmap] BuildTile DLL returned: adt=({AX},{AY}) size={Size}", detourTileX, detourTileY, outSize);
             if (outData == null || outSize <= 0)
             {
-                _logger.LogWarning("[Mmap] BuildTile returned empty for adt=({AX},{AY})", adtX, adtY);
+                _logger.LogWarning("[Mmap] BuildTile returned empty for adt=({AX},{AY})", detourTileX, detourTileY);
                 return null;
             }
 
@@ -856,17 +860,28 @@ public sealed class MmapExtractorService
             if (!wmoResult.Success || wmoResult.Root == null)
                 continue;
 
+            // TEMP-LOG: MODF transform for portal-boundary diagnosis (filter on GOLDMINE)
+            if (wmoName.Contains("GOLDMINE", StringComparison.OrdinalIgnoreCase))
+            {
+                float tPosX = modf.PositionZ - 32f * WowConstants.TileSize;
+                float tPosY = modf.PositionX - 32f * WowConstants.TileSize;
+                float tPosZ = modf.PositionY;
+                _logger.LogInformation("[WMO-MODF] {Path}: posX={PX:F2} posY={PY:F2} posZ={PZ:F2} rotX={RX:F3} rotY={RY:F3} rotZ={RZ:F3} scale={Sc:F3} uId={Uid}",
+                    wmoName, tPosX, tPosY, tPosZ, modf.RotationX, modf.RotationY, modf.RotationZ, modf.Scale, modf.UniqueId);
+            }
+
             // Build rotation matrix matching C++ TerrainBuilder:
-            //   G3D: rotation = fromEulerAnglesXYZ(iRot.z*pi/-180, iRot.x*pi/-180, iRot.y*pi/-180)
-            //   G3D v * kXMat(θ) = Rx(-θ) because G3D column-vector matrix used in row-vector multiply.
-            //   So v * kXMat(-α) = Rx(α). Net effect: Rx(RotZ*π/180), Ry(RotX*π/180), Rz(RotY*π/180).
-            //   System.Numerics CreateRotationX(θ) = standard Rx(θ) → use POSITIVE angles.
+            //   iRot = raw MODF rotation (no fixCoords on rot, only on pos).
+            //   G3D: fromEulerAnglesXYZ(-RotZ/180π, -RotX/180π, -RotY/180π)
+            //   G3D col-convention used with row-vector: G3D_R_col(θ) ≡ Numerics_R(−θ).
+            //   fromEulerAnglesXYZ = Rz*Ry*Rx col → row-vector applies Rz first, then Ry, then Rx.
+            //   Net effect: Numerics_Rz(RotY) * Numerics_Ry(RotX) * Numerics_Rx(RotZ)
             float ax = modf.RotationZ * MathF.PI / 180f;
             float ay = modf.RotationX * MathF.PI / 180f;
             float az = modf.RotationY * MathF.PI / 180f;
-            var rotMatrix = Matrix4x4.CreateRotationX(ax)
+            var rotMatrix = Matrix4x4.CreateRotationZ(az)
                           * Matrix4x4.CreateRotationY(ay)
-                          * Matrix4x4.CreateRotationZ(az);
+                          * Matrix4x4.CreateRotationX(ax);
 
             // Position: fixCoords(rawPos) = (pos.z, pos.x, pos.y)
             //   iPos.x = PositionZ,  iPos.y = PositionX,  iPos.z = PositionY (height)
@@ -977,15 +992,15 @@ public sealed class MmapExtractorService
 
             // Build rotation matrix.
             // MDDF rotation binary order: RotationY (yaw, first), RotationX (pitch, second), RotationZ (roll, third)
-            // In vmap: rot.x = ff[0] = mddf.RotationY (C# field), rot.y = ff[1] = mddf.RotationX, rot.z = ff[2] = mddf.RotationZ
-            // Same sign fix as WMO: C++ G3D v*kXMat(-α)=Rx(α), so use POSITIVE angles.
-            //   ax = RotationZ*π/180, ay = RotationY*π/180, az = RotationX*π/180
+            // iRot = raw MDDF binary (no fixCoords on rot). Binary order: ff[0]=RotY(yaw), ff[1]=RotX(pitch), ff[2]=RotZ(roll)
+            // G3D: fromEulerAnglesXYZ(-RotZ/180π, -RotY/180π, -RotX/180π) [ax=iRot.z, ay=iRot.x, az=iRot.y]
+            // Same Z*Y*X order as WMO: Numerics_Rz(RotX) * Numerics_Ry(RotY) * Numerics_Rx(RotZ)
             float ax = mddf.RotationZ * MathF.PI / 180f;
             float ay = mddf.RotationY * MathF.PI / 180f; // C# field RotationY = yaw = vmap rot.x
             float az = mddf.RotationX * MathF.PI / 180f; // C# field RotationX = pitch = vmap rot.y
-            var rotMatrix = Matrix4x4.CreateRotationX(ax)
+            var rotMatrix = Matrix4x4.CreateRotationZ(az)
                           * Matrix4x4.CreateRotationY(ay)
-                          * Matrix4x4.CreateRotationZ(az);
+                          * Matrix4x4.CreateRotationX(ax);
 
             // Position: fixCoords(rawPos) = (pos.z, pos.x, pos.y)
             //   iPos.x = PositionZ,  iPos.y = PositionX,  iPos.z = PositionY (height)
