@@ -3,7 +3,6 @@ using Microsoft.Extensions.Logging;
 using MaNGOS.Extractor.Core.Binary;
 using MaNGOS.Extractor.Core.Constants;
 using MaNGOS.Extractor.Core.Interfaces;
-using MaNGOS.Extractor.Formats.Vmap.Models;
 using MaNGOS.Extractor.Formats.Wmo.Models;
 
 namespace MaNGOS.Extractor.Formats.Wmo.Parsing;
@@ -45,8 +44,11 @@ public sealed class WmoParser
         var warnings = new List<string>();
         var reader = new SpanReader(data);
 
-        // WMO files start with MVER (version header)
-        uint magic = reader.ReadUInt32();
+        // WMO files start with MVER (version header). Both WMO root and group
+        // files store their chunk magics REVERSED on disk (MaNGOS wmo.cpp::flipcc
+        // reverses each 4-byte magic after reading). We byte-swap here so the
+        // values can be compared against the normal MagicBytes constants.
+        uint magic = ReverseChunkMagic(reader.ReadUInt32());
         if (magic != MagicBytes.Mver)
         {
             // Not a standard WMO — try as root without MVER
@@ -59,7 +61,7 @@ public sealed class WmoParser
         }
 
         // Now read MOHD
-        uint moMagic = reader.ReadUInt32();
+        uint moMagic = ReverseChunkMagic(reader.ReadUInt32());
         if (moMagic != MagicBytes.Mohd)
         {
             warnings.Add($"Invalid WMO magic: expected MOHD (0x{MagicBytes.Mohd:X}), got 0x{moMagic:X}");
@@ -74,13 +76,19 @@ public sealed class WmoParser
             GroupCount = reader.ReadUInt32(),
             PortalCount = reader.ReadUInt32(),
             LightCount = reader.ReadUInt32(),
-            DoodadCount = reader.ReadUInt32(),
-            DoodadSetCount = reader.ReadUInt32(),
-            WmoId = reader.ReadUInt32(),
-            LiquidType = reader.ReadUInt32(),
-            BoundingBoxColor = reader.ReadUInt32(),
+            // MOHD doodad fields (MaNGOS wmo.cpp:78-80, 3 uint32s):
+            //   nModels      = number of doodad paths in MODN
+            //   nDoodads     = number of placements in MODD
+            //   nDoodadSets  = number of sets in MODS
+            DoodadCount = reader.ReadUInt32(),       // nModels
+            DoodadPlacementCount = reader.ReadUInt32(), // nDoodads (was missing — caused WMOID misalignment)
+            DoodadSetCount = reader.ReadUInt32(),    // nDoodadSets
+            // MOHD tail (MaNGOS wmo.cpp:83-87): col, wmoID, bbox, liquidType
+            BoundingBoxColor = reader.ReadUInt32(),  // col (ambient color)
+            WmoId = reader.ReadUInt32(),             // RootWMOID
             BoundingBoxMin = new Vector3Min(reader.ReadFloat(), reader.ReadFloat(), reader.ReadFloat()),
-            BoundingBoxMax = new Vector3Min(reader.ReadFloat(), reader.ReadFloat(), reader.ReadFloat())
+            BoundingBoxMax = new Vector3Min(reader.ReadFloat(), reader.ReadFloat(), reader.ReadFloat()),
+            LiquidType = reader.ReadUInt32(),
         };
 
         // Parse remaining chunks
@@ -89,10 +97,11 @@ public sealed class WmoParser
         var doodadPlacements = new List<WmoDoodadPlacement>();
         var doodadSets = new List<WmoDoodadSet>();
         var textureNames = new List<string>();
+        byte[] doodadPaths = Array.Empty<byte>(); // Raw MODN bytes preserved for NameIndex offset lookup
 
         while (reader.Remaining > 8)
         {
-            uint chunkMagic = reader.ReadUInt32();
+            uint chunkMagic = ReverseChunkMagic(reader.ReadUInt32());
             uint chunkSize2 = reader.ReadUInt32();
 
             switch (chunkMagic)
@@ -105,7 +114,8 @@ public sealed class WmoParser
                     ParseMotx(ref reader, chunkSize2, textureNames);
                     break;
 
-                case MagicBytes.Modn: // Doodad names
+                case MagicBytes.Modn: // Doodad names — keep raw bytes for NameIndex offset resolution
+                    doodadPaths = ParseModnRaw(ref reader, chunkSize2);
                     ParseModn(ref reader, chunkSize2, doodadNames);
                     break;
 
@@ -133,7 +143,8 @@ public sealed class WmoParser
             doodadSets.ToArray(),
             doodadPlacements.ToArray(),
             textureNames.ToArray(),
-            doodadNames.ToArray());
+            doodadNames.ToArray(),
+            doodadPaths);
 
         return WmoParseResult.Ok(root, Array.Empty<WmoGroupFile>());
     }
@@ -160,13 +171,14 @@ public sealed class WmoParser
     {
         var reader = new SpanReader(data);
 
-        // WMO group files start with MVER, then MOGP
-        uint magic = reader.ReadUInt32();
+        // WMO group files start with MVER, then MOGP. Both chunk magics are
+        // REVERSED on disk (MaNGOS wmo.cpp::flipcc) — byte-swap before compare.
+        uint magic = ReverseChunkMagic(reader.ReadUInt32());
         if (magic == MagicBytes.Mver)
         {
             uint mverSize = reader.ReadUInt32();
             reader.Skip((int)mverSize);
-            magic = reader.ReadUInt32(); // read MOGP magic
+            magic = ReverseChunkMagic(reader.ReadUInt32()); // read MOGP magic
         }
         if (magic != MagicBytes.Mogp)
         {
@@ -204,11 +216,14 @@ public sealed class WmoParser
         var triangles = new List<WmoTriangle>();
         var materials = new List<WmoMaterial>();
         ushort[] rawMoba = Array.Empty<ushort>();
+        ushort[] rawMobr = Array.Empty<ushort>();
+        ushort[] doodadRefs = Array.Empty<ushort>();
         WmoLiquidData? liquid = null;
 
         while (reader.Remaining > 8)
         {
-            uint chunkMagic = reader.ReadUInt32();
+            // WMO group chunk magics are also REVERSED on disk (MaNGOS wmo.cpp::flipcc).
+            uint chunkMagic = ReverseChunkMagic(reader.ReadUInt32());
             uint chunkSize2 = reader.ReadUInt32();
 
             switch (chunkMagic)
@@ -233,6 +248,14 @@ public sealed class WmoParser
                     liquid = ParseLiquid(ref reader, (int)chunkSize2);
                     break;
 
+                case MagicBytes.Modr: // Doodad references for this group (MaNGOS wmo.cpp:251-258)
+                    doodadRefs = ParseDoodadReferences(ref reader, (int)chunkSize2);
+                    break;
+
+                case MagicBytes.Mobr: // Face indices for BSP nodes
+                    ParseMobr(ref reader, (int)chunkSize2, out rawMobr);
+                    break;
+
                 default:
                     reader.Skip((int)chunkSize2);
                     break;
@@ -241,7 +264,7 @@ public sealed class WmoParser
             if (chunkSize2 == 0) break; // Safety guard
         }
 
-        return new WmoGroupFile(
+        var groupFile = new WmoGroupFile(
             rootFileName,
             groupIndex,
             header,
@@ -249,7 +272,11 @@ public sealed class WmoParser
             triangles.ToArray(),
             materials.ToArray(),
             rawMoba,
-            liquid);
+            liquid,
+            doodadRefs);
+
+        groupFile.BspTriangleIndices = rawMobr;
+        return groupFile;
     }
 
     private void ParseMogn(ref SpanReader reader, uint chunkSize, List<string> names)
@@ -298,20 +325,52 @@ public sealed class WmoParser
         // ReadSpan already advanced reader by size bytes — caller handles padding
     }
 
+    /// <summary>
+    /// Read the raw MODN block bytes so WmoDoodadPlacement.NameIndex (which
+    /// is a byte offset into the block, not a string-array index) can be
+    /// resolved later. MaNGOS keeps the raw block in
+    /// <c>WMODoodadData::Paths</c> (wmo.cpp:96) and reads it with
+    /// <c>&amp;doodadData.Paths[doodad.NameIndex()]</c> when extracting
+    /// doodad models for the dir_bin record.
+    /// </summary>
+    private static byte[] ParseModnRaw(ref SpanReader reader, uint size)
+    {
+        return reader.ReadBytes((int)size);
+    }
+
+    /// <summary>
+    /// Read MODR: uint16 indices into the root's DoodadData.Spawns that
+    /// this group's geometry actually references. MaNGOS wmo.cpp:251-258.
+    /// </summary>
+    private static ushort[] ParseDoodadReferences(ref SpanReader reader, int size)
+    {
+        if (size <= 0) return Array.Empty<ushort>();
+        int count = size / 2;
+        var refs = new ushort[count];
+        for (int i = 0; i < count; i++)
+            refs[i] = reader.ReadUInt16();
+        return refs;
+    }
+
     private void ParseModd(ref SpanReader reader, uint size, List<WmoDoodadPlacement> placements)
     {
-        uint count = size / 36; // MODD entry size
+        // MODD entry = 40 bytes (MaNGOS wmo.h::MODD). The previous 36-byte
+        // read dropped the W component of the rotation quaternion, which made
+        // doodad rotations degenerate to zero and broke Doodad::ExtractSet's
+        // quaternion composition. Now reads the full 40-byte record.
+        uint count = size / 40;
         for (uint i = 0; i < count; i++)
         {
             placements.Add(new WmoDoodadPlacement
             {
-                NameIndex = reader.ReadUInt32(),
+                NameIndexAndFlags = reader.ReadUInt32(),
                 PositionX = reader.ReadFloat(),
                 PositionY = reader.ReadFloat(),
                 PositionZ = reader.ReadFloat(),
-                RotationY = reader.ReadFloat(),
                 RotationX = reader.ReadFloat(),
+                RotationY = reader.ReadFloat(),
                 RotationZ = reader.ReadFloat(),
+                RotationW = reader.ReadFloat(),
                 Scale = reader.ReadFloat(),
                 Color = reader.ReadUInt32()
             });
@@ -320,7 +379,9 @@ public sealed class WmoParser
 
     private void ParseMods(ref SpanReader reader, uint size, List<WmoDoodadSet> sets)
     {
-        uint count = size / 32; // MODS entry size
+        // MODS entry = 32 bytes (MaNGOS wmo.h::MODS):
+        //   Name[20] | StartIndex(4) | Count(4) | Padding(4)
+        uint count = size / 32;
         for (uint i = 0; i < count; i++)
         {
             string name = reader.ReadFixedString(20);
@@ -329,13 +390,17 @@ public sealed class WmoParser
                 Name = name.Trim(),
                 FirstDoodadIndex = reader.ReadUInt32(),
                 DoodadCount = reader.ReadUInt32(),
-                SetId = reader.ReadUInt32()
+                Padding = reader.ReadUInt32()
             });
         }
     }
 
     private void ParseMovv(ref SpanReader reader, uint size, List<WmoVertex> vertices)
     {
+        // Mirrors MaNGOS wmo.cpp:235-237 — read exactly `size` bytes, then
+        // compute nVertices = size / 12. Reading the exact byte count (not
+        // count*12) ensures the reader is at the correct position for the
+        // next chunk, even if size is not a multiple of 12.
         uint count = size / 12; // 3 floats per vertex
         for (uint i = 0; i < count; i++)
         {
@@ -346,10 +411,15 @@ public sealed class WmoParser
                 Z = reader.ReadFloat()
             });
         }
+        // Skip any trailing bytes if size is not a multiple of 12
+        uint trailing = size - count * 12;
+        if (trailing > 0) reader.Skip((int)trailing);
     }
 
     private void ParseMovi(ref SpanReader reader, uint size, List<WmoTriangle> triangles)
     {
+        // Mirrors MaNGOS wmo.cpp — read exactly `size` bytes, then
+        // compute nTriangles = size / 6. Skip trailing bytes if needed.
         uint count = size / 6; // 3 uint16 per triangle
         for (uint i = 0; i < count; i++)
         {
@@ -360,6 +430,8 @@ public sealed class WmoParser
                 I2 = reader.ReadUInt16()
             });
         }
+        uint trailing = size - count * 6;
+        if (trailing > 0) reader.Skip((int)trailing);
     }
 
     private void ParseMopy(ref SpanReader reader, int size, List<WmoMaterial> materials)
@@ -388,6 +460,14 @@ public sealed class WmoParser
         for (int i = 0; i < count; i++)
             raw[i] = reader.ReadUInt16();
         return raw;
+    }
+
+    private void ParseMobr(ref SpanReader reader, int size, out ushort[] indices)
+    {
+        int count = size / 2;
+        indices = new ushort[count];
+        for (int i = 0; i < count; i++)
+            indices[i] = reader.ReadUInt16();
     }
 
     private WmoLiquidData? ParseLiquid(ref SpanReader reader, int size)
@@ -424,5 +504,20 @@ public sealed class WmoParser
             tileFlags[i] = reader.ReadByte();
 
         return new WmoLiquidData(header, heights, tileFlags);
+    }
+
+    /// <summary>
+    /// WMO root and group files store chunk magics REVERSED on disk
+    /// (MaNGOS wmo.cpp::flipcc reverses the 4 bytes after each Read). This
+    /// swaps the 4 bytes of <paramref name="reversed"/> back to canonical
+    /// "ABCD" order so the value can be compared against MagicBytes constants
+    /// (MVER, MOHD, MOGP, MOVT, MOVI, MOPY, MOBA, MOBR, MLIQ, MODR, …).
+    /// </summary>
+    private static uint ReverseChunkMagic(uint reversed)
+    {
+        return ((reversed & 0x000000FFu) << 24)
+             | ((reversed & 0x0000FF00u) << 8)
+             | ((reversed & 0x00FF0000u) >> 8)
+             | ((reversed & 0xFF000000u) >> 24);
     }
 }

@@ -63,4 +63,15 @@ public struct RecastBuildParams
     public int MaxVertsPerPoly;
     /// <summary>Border size in voxels. Expanded bbox = tile bbox ± BorderSize*CellSize. Passed to rcBuildRegions.</summary>
     public int BorderSize;
+
+    // ---- World-unit Detour params (Mangos C++ hardcodes 2.22155 / 0.4 / 1.0) ----
+    // Stored in the Detour tile header and used by pathfinding queries.
+    // Per-map overrides (e.g. map 562 walkableRadius=0) are applied in C# before
+    // the call.
+    public float WalkableHeightWorld;
+    public float WalkableRadiusWorld;
+    public float WalkableClimbWorld;
+
+    /// <summary>1 = build BVH (Mangos default), 0 = skip.</summary>
+    public int BuildBvTree;
 }

@@ -99,9 +99,12 @@ public struct LiquidData
     /// <summary>64-bit show-mask: bit at [y*Width+x] = 1 means sub-cell is visible.</summary>
     public ulong ShowMask;
     public (byte R, byte G, byte B, byte A)[]? VertexColors;
-    /// <summary>WotLK SLiquidInstance.ofsInfoMask (C++ adt_liquid_header.offsData2b).
-    /// Non-zero when the MH2O cell carries a lightmap block after the height data.</summary>
+    /// <summary>WotLK SLiquidInstance.ofsInfoMask (C++ adt_liquid_header.offsData2a).
+    /// Non-zero when the MH2O cell carries a show-mask (64-bit visibility bitfield).</summary>
     public uint OfsInfoMask;
+    /// <summary>WotLK SLiquidInstance.ofsHeightMap (C++ adt_liquid_header.offsData2b).
+    /// Non-zero when the MH2O cell carries a height map AND/OR a lightmap block (per C++ getLiquidLightMap, the lightmap shares this offset).</summary>
+    public uint OfsHeightMap;
 
     public static LiquidData Empty => default;
     public bool HasLiquid => PrimaryType != LiquidType.None;
@@ -117,5 +120,5 @@ public struct LiquidData
     /// </summary>
     public bool HasLightmap =>
         (VertexFormat & 0x01) == 0     // not FULL_LIGHT
-        && OfsInfoMask != 0;            // lightmap data present
+        && OfsHeightMap != 0;           // lightmap at offsData2b (same offset as height map per C++ getLiquidLightMap)
 }

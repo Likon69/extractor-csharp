@@ -1,7 +1,18 @@
 using MaNGOS.Extractor.Core.Constants;
-using MaNGOS.Extractor.Formats.Vmap.Models;
 
 namespace MaNGOS.Extractor.Formats.Wmo.Models;
+
+// Simple XYZ vector used by WMO bounding-box headers. Lives in the Wmo.Models
+// namespace (not Vmap.Models — that namespace is reserved for the compiled
+// vmap file format and was removed when we deleted the dead VMAPt07 writer).
+public struct Vector3Min
+{
+    public float X;
+    public float Y;
+    public float Z;
+
+    public Vector3Min(float x, float y, float z) { X = x; Y = y; Z = z; }
+}
 
 public struct WmoRootHeader
 {
@@ -11,13 +22,14 @@ public struct WmoRootHeader
     public uint GroupCount;
     public uint PortalCount;
     public uint LightCount;
-    public uint DoodadCount;
-    public uint DoodadSetCount;
+    public uint DoodadCount;       // nModels  (number of doodad paths in MODN)
+    public uint DoodadPlacementCount; // nDoodads (number of placements in MODD) — was missing!
+    public uint DoodadSetCount;    // nDoodadSets (number of sets in MODS)
+    public uint BoundingBoxColor;  // col (ambient color) — comes BEFORE WmoId in MOHD
     public uint WmoId;
-    public uint LiquidType;
-    public uint BoundingBoxColor;
     public Vector3Min BoundingBoxMin;
     public Vector3Min BoundingBoxMax;
+    public uint LiquidType;
 }
 
 public struct WmoGroupHeader
@@ -114,21 +126,35 @@ public struct WmoTriangle
 
 public struct WmoDoodadPlacement
 {
-    public uint NameIndex;
+    // Faithful port of MaNGOS wmo.h::MODD: 40 bytes per entry.
+    // - NameIndexAndFlags: bits 0..23 = name offset into MODN block,
+    //                      bits 24..31 = doodad-specific flags (unused for collision).
+    // - Position[3]: local position inside the WMO's coordinate system (NOT fixCoords).
+    // - Rotation[4]: quaternion (X, Y, Z, W). The doodad's quaternion is composed
+    //                on top of the parent WMO's rotation in Doodad::ExtractSet.
+    // - Scale: uniform scale factor applied to the doodad model.
+    // - Color: BGRA tint packed in a uint32 (unused for collision).
+    public uint NameIndexAndFlags;
     public float PositionX;
     public float PositionY;
     public float PositionZ;
-    public float RotationY;
     public float RotationX;
+    public float RotationY;
     public float RotationZ;
+    public float RotationW;
     public float Scale;
     public uint Color;
+
+    /// <summary>Bits 0..23 of <see cref="NameIndexAndFlags"/> = name offset in MODN.</summary>
+    public uint NameIndex => NameIndexAndFlags & 0x00FFFFFFu;
 }
 
 public struct WmoDoodadSet
 {
+    // Faithful port of MaNGOS wmo.h::MODS: 32 bytes per entry.
+    // The trailing 4 bytes after Count are Padding in the C++ (unused).
     public string Name;
     public uint FirstDoodadIndex;
     public uint DoodadCount;
-    public uint SetId;
+    public uint Padding;
 }
