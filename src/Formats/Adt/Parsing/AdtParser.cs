@@ -195,6 +195,14 @@ public sealed class AdtParser
         LiquidData[] liquids = new LiquidData[256];
         LiquidData[] mclqs = new LiquidData[256]; // MCLQ fallback (C++ System.cpp lignes 827-893)
         ushort[] chunkHoles = new ushort[256]; // P0 FIX: MCNK.holes per chunk (mirrors C++ map_fileheader.holes[16][16])
+        // BUG-009: per-chunk Ypos and HasMcvt (OfsHeight > 0). Needed by MapFileWriter
+        // to reconstruct the global V8/V9 grids exactly like C++ System.cpp (init = ypos,
+        // then += MCVT only when HasMcvt). A chunk absent from the ADT leaves these at
+        // default (0f / false) and MapFileWriter will NOT touch V8/V9 for it, reproducing
+        // the C++ stale-data behavior from global V8/V9 never being reset between tiles.
+        float[] chunkYpos = new float[256];
+        bool[] chunkHasMcvt = new bool[256];
+        bool[] chunkPresent = new bool[256];
 
         // Parse liquid data for all 256 cells from MH2O chunk
         if (waterData.HasValue && mcinEntries.Length == 256)
@@ -221,6 +229,9 @@ public sealed class AdtParser
             var mcnkEntry = mcinEntries[i];
             if (mcnkEntry.Offset == 0 || mcnkEntry.Size == 0)
             {
+                // BUG-009: chunk absent from ADT (C++ !cell at System.cpp:623-625).
+                // Leave V8/V9 untouched — MapFileWriter checks chunkPresent[i] and skips
+                // the V8/V9 write for this chunk, reproducing the C++ global stale data.
                 continue;
             }
 
@@ -238,6 +249,9 @@ public sealed class AdtParser
             if (chunkResult.Mclq.HasLiquid)
                 mclqs[i] = chunkResult.Mclq;
             chunkHoles[i] = chunkResult.Holes;
+            chunkYpos[i] = chunkResult.Ypos;
+            chunkHasMcvt[i] = chunkResult.HasMcvt;
+            chunkPresent[i] = true;
         }
 
         var mddf = header.MddfOffset > 0 ? ParseMddf(reader, mhdrOffset + header.MddfOffset) : Array.Empty<AdtMddf>();
@@ -256,7 +270,8 @@ public sealed class AdtParser
         var tile = new AdtFile(
             mapId, tileX, tileY, path, header, mcinEntries, mfbo,
             textures, wmos, models, mddf, modf,
-            allHeights, areaIds, liquids, mclqs, chunkTextureIds, chunkHoles);
+            allHeights, areaIds, liquids, mclqs, chunkTextureIds, chunkHoles,
+            chunkYpos, chunkHasMcvt, chunkPresent);
 
         return new AdtParseResult(tile, warnings);
     }
@@ -292,6 +307,7 @@ public sealed class AdtParser
             PrimaryType  = AdtFile.LiquidTypeToFlags(liquidType),
             VertexFormat = vertexFormat,
             OfsInfoMask  = ofsInfoMask,
+            OfsHeightMap = ofsHeightMap,
             OffsetX      = offsetX,
             OffsetY      = offsetY,
             Width        = width,
@@ -306,8 +322,6 @@ public sealed class AdtParser
             for (int b = 0; b < 8; b++)
                 mask |= (ulong)reader.ReadByte() << (b * 8);
             liquid.ShowMask = mask;
-            if ((instanceOffset & 0xFFFF) < 0x10) Console.Error.WriteLine($"[DBG-MH2O] cell@{instanceOffset:X} ofsInfoMask=0x{ofsInfoMask:X8} base=0x{mh2oDataBase:X8} target=0x{(mh2oDataBase+ofsInfoMask):X8} mask=0x{mask:X16}");
-            if (mask == 0x430FFD2A430FFD2AUL) Console.Error.WriteLine($"[DBG-DUP] ofsInfoMask=0x{ofsInfoMask:X8} same mask!");
         }
         else
         {
@@ -315,7 +329,12 @@ public sealed class AdtParser
         }
 
         // Read height floats: (Width+1)*(Height+1) values
-        if (ofsHeightMap != 0)
+        // BUG-007: C++ getLiquidHeightMap() returns NULL when formatFlags & ADT_LIQUID_HEADER_NO_HIGHT (0x02).
+        // When that flag is set, the C++ uses heightLevel1 (default flat height) for all cells.
+        // The C# was reading the height map regardless of this flag, producing non-zero heights
+        // where the REF has zeros (min==max==heightLevel1).
+        bool noHeight = (vertexFormat & 0x02) != 0;
+        if (!noHeight && ofsHeightMap != 0)
         {
             reader.Seek((int)(mh2oDataBase + ofsHeightMap));
             int count = (width + 1) * (height + 1);
@@ -539,7 +558,13 @@ public sealed class AdtParser
         return h2o;
     }
 
-    private (float[] Heights, ushort AreaId, LiquidData Liquid, ushort Holes, LiquidData Mclq) ParseMcnk(
+    // BUG-009: ParseMcnk now also returns Ypos and HasMcvt (OfsHeight > 0) per chunk.
+    // The byte-for-byte C++ port in MapFileWriter needs these to reconstruct the
+    // global V8/V9 grids exactly: V8/V9 are initialized to cell->ypos, then += MCVT
+    // is applied only when OfsHeight > 0 (System.cpp:643-687). Without this, a chunk
+    // missing from the ADT cannot be distinguished from a flat chunk, and the global
+    // V8/V9 stale-data behavior (System.cpp:516-517, never reset) cannot be reproduced.
+    private (float[] Heights, ushort AreaId, LiquidData Liquid, ushort Holes, LiquidData Mclq, float Ypos, bool HasMcvt) ParseMcnk(
         SpanReader reader, int startOffset, int chunkSize, LiquidData? waterData, List<string> warnings)
     {
         reader.Seek(startOffset);
@@ -548,7 +573,7 @@ public sealed class AdtParser
         if (magic != MagicBytes.Mcnk)
         {
             warnings.Add($"MCNK at {startOffset} has invalid magic: {MagicBytes.FourCCToString(magic)}");
-            return (new float[AdtMcvt.TotalVertices], 0, waterData ?? LiquidData.Empty, 0, LiquidData.Empty);
+            return (new float[AdtMcvt.TotalVertices], 0, waterData ?? LiquidData.Empty, 0, LiquidData.Empty, 0f, false);
         }
 
         reader.Skip(4); // size (already known)
@@ -580,12 +605,12 @@ public sealed class AdtParser
             LowQualityTex5 = reader.ReadUInt16(), // 0x4A
             LowQualityTex6 = reader.ReadUInt16(), // 0x4C
             LowQualityTex7 = reader.ReadUInt16(), // 0x4E
-            NEffectDoodad  = reader.ReadUInt32(), // 0x50
-            OfsSndEmitters = reader.ReadUInt32(), // 0x54
-            NSndEmitters   = reader.ReadUInt32(), // 0x58
-            OfsLiquid      = reader.ReadUInt32(), // 0x5C
-            SizeLiquid     = reader.ReadUInt32(), // 0x60
-            PredTex        = reader.ReadUInt32(), // 0x64
+            PredTex        = reader.ReadUInt32(), // 0x50
+            NEffectDoodad  = reader.ReadUInt32(), // 0x54
+            OfsSndEmitters = reader.ReadUInt32(), // 0x58
+            NSndEmitters   = reader.ReadUInt32(), // 0x5C
+            OfsLiquid      = reader.ReadUInt32(), // 0x60  offset to MCLQ (was reading 0x5C = nSndEmitters — BUG-006)
+            SizeLiquid     = reader.ReadUInt32(), // 0x64
             Zpos           = reader.ReadFloat(),  // 0x68  position.x in file layout
             Xpos           = reader.ReadFloat(),  // 0x6C  position.y in file layout
             Ypos           = reader.ReadFloat(),  // 0x70  position.z = height base
@@ -614,7 +639,7 @@ public sealed class AdtParser
             Array.Fill(heights, header.Ypos);
         }
 
-        return (heights, (ushort)header.AreaId, waterData ?? ParseMclq(reader, startOffset, in header) ?? LiquidData.Empty, (ushort)(header.Holes & 0xFFFFu), ParseMclq(reader, startOffset, in header) ?? LiquidData.Empty);
+        return (heights, (ushort)header.AreaId, waterData ?? ParseMclq(reader, startOffset, in header) ?? LiquidData.Empty, (ushort)(header.Holes & 0xFFFFu), ParseMclq(reader, startOffset, in header) ?? LiquidData.Empty, header.Ypos, header.OfsHeight > 0);
     }
 
     /// <summary>
@@ -681,19 +706,19 @@ public sealed class AdtParser
             return null;
 
         // Type from MCNK.flags bits 2,3,4 (System.cpp lignes 862-877)
-        //   bit 2 → water (entry=1)
-        //   bit 3 → ocean (entry=2)
-        //   bit 4 → magma (entry=3)
+        //   bit 2 → water  (entry=1, MAP_LIQUID_TYPE_WATER  = 0x08)
+        //   bit 3 → ocean  (entry=2, MAP_LIQUID_TYPE_OCEAN  = 0x02)
+        //   bit 4 → magma  (entry=3, MAP_LIQUID_TYPE_MAGMA  = 0x01)
+        // NB: valeurs C++ directes — PAS l'enum C# (qui a Water=0x01, Magma=0x04)
         uint cFlag = header.Flags;
         ushort rawTypeId;
-        LiquidType liquidType;
-        if ((cFlag & (1u << 4)) != 0) { rawTypeId = 3; liquidType = LiquidType.Magma; }
-        else if ((cFlag & (1u << 3)) != 0) { rawTypeId = 2; liquidType = LiquidType.Ocean; }
-        else if ((cFlag & (1u << 2)) != 0) { rawTypeId = 1; liquidType = LiquidType.Water; }
+        byte typeFlags;
+        if ((cFlag & (1u << 4)) != 0)      { rawTypeId = 3; typeFlags = 0x01; } // MAGMA
+        else if ((cFlag & (1u << 3)) != 0) { rawTypeId = 2; typeFlags = 0x02; } // OCEAN
+        else if ((cFlag & (1u << 2)) != 0) { rawTypeId = 1; typeFlags = 0x08; } // WATER
         else return null; // flags sans bit 2/3/4 → pas de liquide valide
 
-        byte typeFlags = (byte)liquidType;
-        if (hasDarkWater && liquidType == LiquidType.Ocean)
+        if (hasDarkWater && typeFlags == 0x02) // OCEAN
             typeFlags |= 0x10; // MAP_LIQUID_TYPE_DARK_WATER
 
         // MinHeight = min des heights du MCLQ (utilisé par liquidLevel du header)

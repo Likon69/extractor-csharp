@@ -90,6 +90,17 @@ public sealed class MapTile
     public float MinHeight { get; set; }
     public float MaxHeight { get; set; }
 
+    // BUG-009: per-chunk MCNK metadata for the global V8/V9 reconstruction in
+    // MapFileWriter. Mirrors C++ System.cpp ConvertADT: V8/V9 are globals never
+    // reset between tiles; each present chunk sets V9/V8 = ypos then += MCVT;
+    // absent chunks leave the previous tile's values in place.
+    /// <summary>256 MCNK.Ypos values (world altitude = MCVT height base). Index = chunkY*16 + chunkX.</summary>
+    public float[]? ChunkYpos { get; set; }
+    /// <summary>256 flags: chunk has an MCVT sub-chunk (MCNK.OfsHeight > 0).</summary>
+    public bool[]? ChunkHasMcvt { get; set; }
+    /// <summary>256 flags: chunk present in the ADT (MCIN.Offset != 0).</summary>
+    public bool[]? ChunkPresent { get; set; }
+
     public MapTile(uint mapId, int tileX, int tileY) => (MapId, TileX, TileY) = (mapId, tileX, tileY);
 }
 
@@ -116,6 +127,8 @@ public struct MapLiquidCell
     public ushort VertexFormat;
     /// <summary>WotLK SLiquidInstance.ofsInfoMask — non-zero when lightmap data is present.</summary>
     public uint OfsInfoMask;
+    /// <summary>WotLK SLiquidInstance.offsData2b (C++ getLiquidHeightMap/getLiquidLightMap).</summary>
+    public uint OfsHeightMap;
     public bool HasLiquid => TypeFlags != 0;
     /// <summary>
     /// Faithful port of MaNGOS C++ getLiquidLightMap(): returns true when the
@@ -124,7 +137,7 @@ public struct MapLiquidCell
     /// </summary>
     public bool HasLightmap =>
         (VertexFormat & 0x01) == 0
-        && OfsInfoMask != 0;
+        && OfsHeightMap != 0;  // C++ getLiquidLightMap checks offsData2b (= OfsHeightMap), not offsData2a (= OfsInfoMask)
 }
 
 public readonly struct MapLiquidEntry

@@ -91,6 +91,12 @@ public sealed class AdtFile
     private readonly LiquidData[] _mclqs;
     private readonly uint[] _chunkTextureIds; // MCLY: which texture each MCNK uses
     private readonly ushort[] _chunkHoles;    // P0 FIX: MCNK.holes per chunk (mirrors C++ map_fileheader.holes[16][16])
+    // BUG-009: per-chunk MCNK metadata needed to reconstruct global V8/V9 exactly
+    // like C++ System.cpp (init = ypos, += MCVT only when HasMcvt; absent chunks
+    // leave the global V8/V9 untouched — stale data between tiles).
+    private readonly float[] _chunkYpos;       // MCNK.Ypos (world altitude, height base) per chunk
+    private readonly bool[] _chunkHasMcvt;     // MCNK.OfsHeight > 0 (MCVT present) per chunk
+    private readonly bool[] _chunkPresent;     // chunk present in ADT (MCIN.Offset != 0) per chunk
 
     /// <summary>Map ID this tile belongs to.</summary>
     public uint MapId { get; }
@@ -249,7 +255,8 @@ public sealed class AdtFile
         AdtMddf[] doodads, AdtModf[] wmosPlacements,
         float[] heights, ushort[] areaIds, LiquidData[] liquids,
         LiquidData[] mclqs,
-        uint[] chunkTextureIds, ushort[] chunkHoles)
+        uint[] chunkTextureIds, ushort[] chunkHoles,
+        float[] chunkYpos, bool[] chunkHasMcvt, bool[] chunkPresent)
     {
         MapId = mapId;
         TileX = tileX;
@@ -269,7 +276,24 @@ public sealed class AdtFile
         _mclqs = mclqs ?? new LiquidData[256];
         _chunkTextureIds = chunkTextureIds ?? new uint[256];
         _chunkHoles = chunkHoles ?? new ushort[256];
+        _chunkYpos = chunkYpos ?? new float[256];
+        _chunkHasMcvt = chunkHasMcvt ?? new bool[256];
+        _chunkPresent = chunkPresent ?? new bool[256];
     }
+
+    /// <summary>MCNK.Ypos (world altitude = MCVT height base) for the given chunk. BUG-009.</summary>
+    public float GetChunkYpos(int chunkIndex)
+        => chunkIndex >= 0 && chunkIndex < 256 ? _chunkYpos[chunkIndex] : 0f;
+
+    /// <summary>True when the chunk has an MCVT sub-chunk (MCNK.OfsHeight > 0). BUG-009.</summary>
+    public bool GetChunkHasMcvt(int chunkIndex)
+        => chunkIndex >= 0 && chunkIndex < 256 && _chunkHasMcvt[chunkIndex];
+
+    /// <summary>True when the chunk is present in the ADT (MCIN.Offset != 0).
+    /// Absent chunks must leave the global V8/V9 grids untouched in MapFileWriter
+    /// to reproduce the C++ stale-data behavior (System.cpp:516-517, 622-625). BUG-009.</summary>
+    public bool GetChunkPresent(int chunkIndex)
+        => chunkIndex >= 0 && chunkIndex < 256 && _chunkPresent[chunkIndex];
 
     /// <summary>Returns true if the given texture name contains road-like patterns.</summary>
     public static bool IsRoadTexture(string textureName)
