@@ -214,18 +214,47 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private Action<string, LogLevel>? _logCallback;
     private DateTime _lastUiLog = DateTime.MinValue;
+    // Batching: accumulate log messages between flushes, then push them all to
+    // the UI ObservableCollection in a single Dispatcher.Invoke. This collapses
+    // a flood of per-message BeginInvoke calls into one UI update per batch.
+    private readonly System.Collections.Concurrent.ConcurrentQueue<(string Msg, Mel.LogLevel Lvl)> _pendingUiLogs = new();
+    private DateTime _nextUiLogFlush = DateTime.MinValue;
+    private const int UiLogBatchSize = 200;
+    private const double UiLogBatchIntervalMs = 250;
 
     public MainViewModel()
     {
         _logCallback = (msg, lvl) =>
         {
-            // Always write to file, but throttle UI updates to avoid freeze
+            // Always write to file (cheap, async-safe).
             FileLog.Write(msg, lvl);
-            if (lvl >= LogLevel.Error || (DateTime.UtcNow - _lastUiLog).TotalMilliseconds >= 200)
+
+            // Filter spammy expected warnings from the UI — they still land in
+            // the log file but don't flood the ListBox. Transports and missing
+            // WDTs are normal (5744+ maps includes a lot of transport/test
+            // entries without a WDT).
+            if (msg.Contains("WDT introuvable", StringComparison.Ordinal)) return;
+            if (msg.Contains("Cannot load .m2", StringComparison.Ordinal)) return;
+
+            // Errors always reach the UI; other levels are throttled.
+            bool urgent = lvl >= LogLevel.Error;
+            if (!urgent && (DateTime.UtcNow - _lastUiLog).TotalMilliseconds < UiLogBatchIntervalMs)
             {
-                _lastUiLog = DateTime.UtcNow;
-                System.Windows.Application.Current?.Dispatcher.BeginInvoke(() => AddLog(msg, lvl));
+                _pendingUiLogs.Enqueue((msg, lvl));
+                return;
             }
+            _lastUiLog = DateTime.UtcNow;
+
+            // Drain anything pending first, then dispatch this message.
+            var batch = new List<(string, Mel.LogLevel)>(UiLogBatchSize);
+            while (batch.Count < UiLogBatchSize && _pendingUiLogs.TryDequeue(out var p))
+                batch.Add(p);
+            batch.Add((msg, lvl));
+
+            System.Windows.Application.Current?.Dispatcher.BeginInvoke(() =>
+            {
+                foreach (var (m, l) in batch) AddLog(m, l);
+            });
         };
         _loggerFactory = LoggerFactory.Create(b => b.AddProvider(new FileLogLoggerProvider(_logCallback)));
         _tileGrid = new TileGridViewModel();
@@ -698,7 +727,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
         var ts = DateTime.Now.ToString("HH:mm:ss");
         LogMessages.Add(new LogMessage($"[{ts}] {message}", level));
         FileLog.Write(message, level);
-        while (LogMessages.Count > 1000) LogMessages.RemoveAt(0);
+        // Trim in batches of 100 (cheap) instead of one RemoveAt(0) per add
+        // (O(n) per call, repeated 5 times/sec under heavy log load).
+        if (LogMessages.Count > 1100)
+        {
+            for (int i = 0; i < 100 && LogMessages.Count > 1000; i++)
+                LogMessages.RemoveAt(0);
+        }
     }
 
     private void OnPropertyChanged([CallerMemberName] string? name = null)
@@ -743,6 +778,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private async Task RunOutputMetricsLoopAsync(CancellationToken ct)
     {
+        // Throttle to 3s instead of 1s. GetDirectorySizeSafe recursively
+        // enumerates every file under OutputPath, which can take several
+        // seconds when the extraction is producing thousands of .vmtile/
+        // .vmo/.vmd files. A 1s loop saturates the disk and starves the UI.
         while (!ct.IsCancellationRequested)
         {
             try
@@ -755,7 +794,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 // Ignore transient IO errors while files are being written.
             }
 
-            await Task.Delay(1000, ct);
+            await Task.Delay(3000, ct);
         }
     }
 
