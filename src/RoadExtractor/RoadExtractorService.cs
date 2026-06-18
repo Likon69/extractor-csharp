@@ -1,11 +1,13 @@
+using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using MaNGOS.Extractor.Core.Constants;
 using MaNGOS.Extractor.Core.Interfaces;
 using MaNGOS.Extractor.Core.Models;
-using MaNGOS.Extractor.Formats.Adt.Models;
-using MaNGOS.Extractor.Formats.Adt.Parsing;
 using MaNGOS.Extractor.Formats.Wdt;
 
 namespace MaNGOS.Extractor.RoadExtractor;
@@ -14,13 +16,13 @@ public sealed class RoadExtractorService
 {
     private readonly IArchiveReader _archive;
     private readonly WdtReader _wdtReader;
-    private readonly AdtParser _adtParser;
     private readonly ILogger _logger;
     private readonly string _outputDir;
 
     private static readonly string[] RoadPatterns =
     {
-        "road", "cobblestone", "path_stone", "bridgefloor"
+        "road", "cobblestone", "path_cobble", "path_stone",
+        "dirtpath", "dirt_path", "bridgefloor", "bridge_stone"
     };
 
     public RoadExtractorService(
@@ -31,7 +33,6 @@ public sealed class RoadExtractorService
         _archive = archive;
         _logger = loggerFactory.CreateLogger<RoadExtractorService>();
         _wdtReader = new WdtReader(archive);
-        _adtParser = new AdtParser(archive, loggerFactory.CreateLogger<AdtParser>());
         _outputDir = outputDir;
         if (!Directory.Exists(outputDir))
             Directory.CreateDirectory(outputDir);
@@ -57,6 +58,7 @@ public sealed class RoadExtractorService
         var tiles = _wdtReader.GetExistingTiles();
         if (onlyTileX.HasValue && onlyTileY.HasValue)
             tiles = tiles.Where(t => t.X == onlyTileX.Value && t.Y == onlyTileY.Value).ToList();
+        
         _logger.LogInformation("[Road] Found {Count} ADT tiles for {MapName}", tiles.Count, mapName);
 
         int successCount = 0, failCount = 0;
@@ -88,27 +90,28 @@ public sealed class RoadExtractorService
 
     private async Task<(bool ok, int roadChunkCount, int totalChunkCount)> ProcessTileAsync(uint mapId, string mapName, int tileX, int tileY, CancellationToken ct)
     {
-        if (File.Exists(Path.Combine(_outputDir, $"{mapId:D3}{tileY:D2}{tileX:D2}.road")))
+        string fileName = $"{mapId:D3}{tileY:D2}{tileX:D2}.road";
+        string filePath = Path.Combine(_outputDir, fileName);
+
+        if (File.Exists(filePath))
         {
             _logger.LogDebug("[Road] Skipping ({TileX},{TileY}) — already exists", tileX, tileY);
             return (true, 0, 256);
         }
 
-        int roadChunkCount = 0, totalChunkCount = 256;
         string adtPath = $"World\\Maps\\{mapName}\\{mapName}_{tileX}_{tileY}.adt";
 
-        var result = await _adtParser.ParseAsync(adtPath, mapId, tileX, tileY, ct);
-        if (!result.Success || result.Tile == null)
+        if (!_archive.TryReadFile(adtPath, out var fileData))
         {
-            _logger.LogWarning("[Road] Failed to parse ADT ({TileX},{TileY})", tileX, tileY);
+            _logger.LogWarning("[Road] Failed to read ADT ({TileX},{TileY})", tileX, tileY);
+            // In C++, if ADT fails to load, no .road file is created
             return (false, 0, 256);
         }
 
-        var roadFlags = DetectRoadChunksPerChunk(result.Tile);
-        roadChunkCount = roadFlags.Count(b => b == 1);
+        byte[] roadFlags = new byte[256];
+        bool hasRoad = ExtractRoadMask(fileData.Span, roadFlags);
 
-        string fileName = $"{mapId:D3}{tileY:D2}{tileX:D2}.road";
-        string filePath = Path.Combine(_outputDir, fileName);
+        int roadChunkCount = roadFlags.Count(b => b == 1);
 
         if (roadChunkCount > 0)
             _logger.LogInformation("[Road] ADT ({TileX},{TileY}): {RoadChunks}/256 road chunks detected",
@@ -126,22 +129,121 @@ public sealed class RoadExtractorService
         }
     }
 
-    private byte[] DetectRoadChunksPerChunk(AdtFile adt)
+    private static bool ExtractRoadMask(ReadOnlySpan<byte> data, byte[] roadMask)
     {
-        var roadFlags = new byte[256];
+        Array.Clear(roadMask, 0, 256);
 
-        for (int chunkIdx = 0; chunkIdx < 256; chunkIdx++)
+        if (data.Length < 20)
+            return false;
+
+        int mtexOffset = -1;
+        uint mtexSize = 0;
+
+        List<uint> mcnkOffsets = new List<uint>();
+
+        uint pos = 0;
+        uint fileSize = (uint)data.Length;
+
+        while (pos + 8 <= fileSize)
         {
-            uint textureId = adt.GetChunkTextureId(chunkIdx);
+            uint magic = BitConverter.ToUInt32(data.Slice((int)pos, 4));
+            uint size = BitConverter.ToUInt32(data.Slice((int)pos + 4, 4));
 
-            if (textureId < adt.TextureNames.Length)
+            uint remaining = fileSize - pos - 8;
+            if (size > remaining)
+                break;
+
+            if (magic == 0x4D544558) // 'MTEX' -> M(0x4D), T(0x54), E(0x45), X(0x58) -> Little-endian uint32: 0x5845544D.
             {
-                string texName = adt.TextureNames[(int)textureId];
-                roadFlags[chunkIdx] = IsRoadTexture(texName) ? (byte)1 : (byte)0;
+                // Wait! In C++, `magic == 0x4D544558`.
+                // In C++, magic is *(uint32*). On x86, it reads the bytes as little-endian.
+                // Memory: 'M' (0x4D), 'T' (0x54), 'E' (0x45), 'X' (0x58).
+                // *(uint32*) = 0x5845544D. So `magic == 0x4D544558` in C++ means memory has 0x58, 0x45, 0x54, 0x4D which is "XETM".
+                // Let's use the exact same comparison as C++. BitConverter.ToUInt32 will give the exact same result as *(uint32*).
+            }
+
+            // Actually, let's just check the exact same integer as the C++ code to be byte-for-byte compatible.
+            if (magic == 0x4D544558)
+            {
+                mtexOffset = (int)(pos + 8);
+                mtexSize = size;
+            }
+
+            if (magic == 0x4D434E4B) // 'MCNK' magic check in C++
+            {
+                mcnkOffsets.Add(pos);
+            }
+
+            pos += 8 + size;
+        }
+
+        if (mtexOffset == -1 || mtexSize == 0)
+            return false;
+
+        // Build texture name table
+        List<string> texNames = new List<string>();
+        int p = mtexOffset;
+        int end = mtexOffset + (int)mtexSize;
+        while (p < end)
+        {
+            int strEnd = p;
+            while (strEnd < end && data[strEnd] != 0) strEnd++;
+            if (strEnd > p)
+            {
+                string texName = System.Text.Encoding.ASCII.GetString(data.Slice(p, strEnd - p));
+                texNames.Add(texName);
+            }
+            else
+            {
+                texNames.Add(string.Empty);
+            }
+            p = strEnd + 1;
+        }
+
+        bool anyRoad = false;
+        for (int ci = 0; ci < mcnkOffsets.Count && ci < 256; ++ci)
+        {
+            int chunkRow = ci / 16;
+            int chunkCol = ci % 16;
+
+            uint mcnkOff = mcnkOffsets[ci];
+            uint mcnkSize = BitConverter.ToUInt32(data.Slice((int)mcnkOff + 4, 4));
+            uint mcnkEnd = mcnkOff + 8 + mcnkSize;
+
+            if (mcnkEnd > fileSize)
+                continue;
+
+            // ofsLayer at offset 0x1C in SMChunk header (mcnkOff + 8 + 0x1C)
+            uint ofsLayer = BitConverter.ToUInt32(data.Slice((int)mcnkOff + 8 + 0x1C, 4));
+            if (ofsLayer == 0)
+                continue;
+
+            uint mclyOff = mcnkOff + ofsLayer;
+            if (mclyOff + 8 > mcnkEnd)
+                continue;
+
+            uint mclyMagic = BitConverter.ToUInt32(data.Slice((int)mclyOff, 4));
+            uint mclySize = BitConverter.ToUInt32(data.Slice((int)mclyOff + 4, 4));
+
+            if (mclyMagic != 0x4D434C59) // 'MCLY' magic check in C++
+                continue;
+
+            int numLayers = (int)(mclySize / 16); // MCLYEntry size is 16
+
+            for (int l = 0; l < numLayers; ++l)
+            {
+                int layerOffset = (int)(mclyOff + 8 + l * 16);
+                uint texIdx = BitConverter.ToUInt32(data.Slice(layerOffset, 4));
+                if (texIdx < texNames.Count && IsRoadTexture(texNames[(int)texIdx]))
+                {
+                    roadMask[chunkRow * 16 + chunkCol] = 1;
+                    anyRoad = true;
+                    break;
+                }
             }
         }
 
-        return roadFlags;
+        return anyRoad;
     }
 
     private static bool IsRoadTexture(string textureName)
@@ -158,5 +260,5 @@ public sealed class RoadExtractorService
         return false;
     }
 
-    internal void ClearCache() => _adtParser.ClearCache();
+    internal void ClearCache() { }
 }

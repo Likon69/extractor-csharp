@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO;
 using MaNGOS.Extractor.Core.Constants;
 using MaNGOS.Extractor.Core.Models;
+using MaNGOS.Extractor.DbcExtractor;
 using MaNGOS.Extractor.Formats.Mpq;
 using MaNGOS.Extractor.MapExtractor;
 using MaNGOS.Extractor.MmapExtractor;
@@ -42,17 +43,44 @@ public static class Program
         using var archives = MpqArchiveCollection.FromWoWDirectory(
             options.WoWPath, options.Locale, _loggerFactory);
 
+        // Load DBC tables once at startup — mirrors MaNGOS C++ System.cpp
+        // ExtractMapsFromMpq(): "ReadMapDBC(); ReadAreaTableDBC(); ReadLiquidTypeTableDBC();"
+        // Without these, the .map file's AREA section is all 0xFFFF and the
+        // LIQUID type flags fall back to wrong values.
+        MaNGOS.Extractor.Formats.Adt.Models.AdtFile.LoadAreaTable(archives);
+        MaNGOS.Extractor.Formats.Adt.Models.AdtFile.LoadLiquidTypeTable(archives);
+
         var progress = new ConsoleProgress();
         var ct = CancellationToken.None;
         int processed = 0;
 
-        if (options.Phases.Contains("vmap", StringComparer.OrdinalIgnoreCase))
+        // Single vmap service for the whole phase — the dedup HashSet of
+        // .vmo/.vmd files (already written during per-map MDDF/MODF
+        // processing) is shared with the global GameObjectDisplayInfo pass.
+        // Created only when either VmapExtract or VmapAssemble is requested
+        // (mirrors the 2 sub-phases of MaNGOS vmap-extractor.exe).
+        MaNGOS.Extractor.VmapExtractor.MangosVmapExtractorService? vmapSvc = null;
+        bool needVmapExtract = options.Phases.Contains("vmapextract", StringComparer.OrdinalIgnoreCase);
+        bool needVmapAssemble = options.Phases.Contains("vmapassemble", StringComparer.OrdinalIgnoreCase);
+        bool needVmapLegacy = options.Phases.Contains("vmap", StringComparer.OrdinalIgnoreCase);
+        if (needVmapExtract || needVmapAssemble || needVmapLegacy)
         {
-            string vmapDir = Path.Combine(options.OutputPath, "vmaps");
-            Console.WriteLine("=== Extracting GAMEOBJECT_MODELS ===");
-            var goModelsExtractor = new GameObjectModelsExtractor(archives, _loggerFactory, vmapDir);
-            int extractedModels = await goModelsExtractor.ExtractAsync(ct);
-            Console.WriteLine($"  [Vmap] GAMEOBJECT_MODELS extracted: {extractedModels} models.");
+            // Pass the output ROOT, not output/vmaps — the service itself
+            // writes to Buildings/, vmaps/ and Buildings/dir_bin as siblings
+            // (matches MaNGOS C++ output layout byte-for-byte).
+            vmapSvc = new MaNGOS.Extractor.VmapExtractor.MangosVmapExtractorService(archives, _loggerFactory, options.OutputPath);
+        }
+
+        // Global DBC/DB2 extraction (independent of map ID). Mirrors MaNGOS C++
+        // map-extractor/System.cpp::ExtractDBCFiles — writes all *.dbc/*.db2
+        // found across the MPQ archives to <output>/dbc/ (basicLocale=true layout),
+        // plus component.wow-<locale>.txt. Consumed by the worldserver at startup.
+        if (options.Phases.Contains("dbc", StringComparer.OrdinalIgnoreCase))
+        {
+            string dbcDir = Path.Combine(options.OutputPath, "dbc");
+            var dbcSvc = new DbcExtractorService(archives, _loggerFactory, dbcDir);
+            int dbcCount = await dbcSvc.ExtractAsync(options.Locale, ct);
+            Console.WriteLine($"  [Dbc] {dbcCount} files extracted.");
         }
 
         foreach (var mid in options.MapIds)
@@ -71,12 +99,29 @@ public static class Program
                 processed += tiles;
             }
 
-            if (options.Phases.Contains("vmap", StringComparer.OrdinalIgnoreCase))
+            // Phase VmapExtract: mirrors vmap-extractor.cpp::ExtractWmo + ParseMapFiles
+            // + ExtractGameobjectModels. Writes raw .vmo/.vmd (VMAPt07) to Buildings/
+            // and a dir_bin index. NO .vmtree/.vmtile yet.
+            if (needVmapExtract && vmapSvc != null)
             {
-                string vmapDir = Path.Combine(options.OutputPath, "vmaps");
-                var svc = new VmapExtractorService(archives, _loggerFactory, vmapDir);
-                int tiles = await svc.ExtractMapAsync(mapId, mapName, progress, ct, options.TileX, options.TileY);
-                Console.WriteLine($"  [Vmap] {tiles} tiles extracted.");
+                int tiles = await vmapSvc.ExtractMapAsync(mapId, mapName, ct, options.TileX, options.TileY, skipAssemble: true);
+                Console.WriteLine($"  [VmapExtract] {tiles} tiles → Buildings/ (raw VMAPt07) + dir_bin.");
+            }
+
+            // Phase VmapAssemble: mirrors vmap-extractor.cpp::AssembleVMAP (TileAssembler::convertWorld2).
+            // Reads Buildings/dir_bin, builds the BIH, writes .vmtree + .vmtile and
+            // copies/rewrites the FINAL .vmo/.vmd (VMAP_4.0) to vmaps/.
+            if (needVmapAssemble && vmapSvc != null)
+            {
+                bool ok = vmapSvc.AssembleMap(mapId, mapName);
+                Console.WriteLine($"  [VmapAssemble] {(ok ? "OK" : "FAILED")} → vmaps/.");
+            }
+
+            // Legacy combined "Vmap" phase: does both extract + assemble in one pass.
+            if (needVmapLegacy && vmapSvc != null)
+            {
+                int tiles = await vmapSvc.ExtractMapAsync(mapId, mapName, ct, options.TileX, options.TileY);
+                Console.WriteLine($"  [Vmap] {tiles} tiles → vmtile + vmtree + .vmo/.vmd.");
             }
 
             if (options.Phases.Contains("road", StringComparer.OrdinalIgnoreCase))
@@ -98,12 +143,33 @@ public static class Program
                     walkableRadius: 2,
                     walkableClimb: 5);
                 string roadDir = Path.Combine(options.OutputPath, "roadmaps");
+                // vmapDir is the output root — the MmapExtractorService/MangosVmapGeometryLoader
+                // appends "vmaps/" internally when looking for .vmtile/.vmo/.vmd files.
+                string vmapDir = options.OutputPath;
+                // Read terrain from the extracted .map files written by the
+                // map phase — same as C++ MapBuilder::buildTile → TerrainBuilder::loadMap.
+                string mapsDir = Path.Combine(options.OutputPath, "maps");
                 var svc = new MmapExtractorService(archives, _loggerFactory, mmapDir,
-                    recast, options.Threads, options.GoSpawnsPath, offMeshPath: options.OffMeshPath, roadMapsDir: roadDir);
+                    recast, options.Threads, options.GoSpawnsPath, offMeshPath: options.OffMeshPath,
+                    roadMapsDir: roadDir, vmapDir: vmapDir, mapsDir: mapsDir);
                 int tiles = await svc.ExtractMapAsync(mapId, mapName, progress, ct, options.TileX, options.TileY);
                 Console.WriteLine($"  [Mmap] {tiles} tiles extracted.");
                 processed += tiles;
             }
+        }
+
+        // After all per-map passes are done, run the global GameObject models
+        // extraction (mirrors C++ ExtractGameobjectModels from the vmap-export
+        // tool, minus the temp_gameobject_models index file). The .vmo/.vmd
+        // collision meshes are deduped against the per-map MDDF/MODF set.
+        // gameobject_spawns.bin itself is user-provided and never created here.
+        // Skipped when only running VmapAssemble (extract already done).
+        if (vmapSvc != null && (needVmapExtract || needVmapLegacy))
+        {
+            Console.WriteLine();
+            Console.WriteLine("=== Extracting GameObject model .vmo/.vmd (DBC) ===");
+            int goBuilt = await vmapSvc.ExtractGameObjectModelsAsync(ct);
+            Console.WriteLine($"  [Vmap] {goBuilt} GameObject .vmo/.vmd collision meshes built.");
         }
 
         Console.WriteLine();
@@ -183,7 +249,7 @@ public static class Program
             opts.MapIds = new[] { 0, 1, 530, 571 };
 
         if (opts.Phases.Length == 0)
-            opts.Phases = new[] { "Map", "Vmap", "Road", "Mmap" };
+            opts.Phases = new[] { "Dbc", "Map", "VmapExtract", "VmapAssemble", "Road", "Mmap" };
 
         return opts;
     }
@@ -200,7 +266,7 @@ public static class Program
         Console.WriteLine("Usage: MaNGOS.Extractor.CLI [options]");
         Console.WriteLine("  --wow <path>        WoW client path (required)");
         Console.WriteLine("  --out <path>        Output directory (required)");
-        Console.WriteLine("  --phases <csv>      Comma-separated phases (default: Map,Vmap,Road,Mmap)");
+        Console.WriteLine("  --phases <csv>      Comma-separated phases (default: Dbc,Map,VmapExtract,VmapAssemble,Road,Mmap)");
         Console.WriteLine("  --maps <csv>        Comma-separated map IDs (default: 0,1,530,571)");
         Console.WriteLine("  --tile <x,y>        Extract only one ADT tile, e.g. --tile 35,20");
         Console.WriteLine("  --threads <n>       Max threads (default: 4)");

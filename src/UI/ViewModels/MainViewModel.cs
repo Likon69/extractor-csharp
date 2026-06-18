@@ -18,6 +18,7 @@ using MaNGOS.Extractor.Formats.Wdt;
 using MaNGOS.Extractor.MapExtractor;
 using MaNGOS.Extractor.MmapExtractor;
 using MaNGOS.Extractor.RoadExtractor;
+using MaNGOS.Extractor.DbcExtractor;
 using MaNGOS.Extractor.UI.Config;
 using MaNGOS.Extractor.VmapExtractor;
 using Mel = Microsoft.Extensions.Logging;
@@ -478,12 +479,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
             var enabledPhases = Phases.Where(p => p.IsEnabled).Select(p => p.Name).ToList();
             string mapDir = Path.Combine(OutputPath, "maps");
-            string vmapDir = Path.Combine(OutputPath, "vmaps");
             string roadDir = Path.Combine(OutputPath, "roadmaps");
             string mmapDir = Path.Combine(OutputPath, "mmaps");
 
             Directory.CreateDirectory(mapDir);
-            Directory.CreateDirectory(vmapDir);
             Directory.CreateDirectory(roadDir);
             Directory.CreateDirectory(mmapDir);
 
@@ -534,12 +533,31 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
             int successfulTiles = 0;
 
+            // Single vmap service for the whole phase — the dedup HashSet of
+            // .vmo/.vmd files (already written during per-map MDDF/MODF
+            // processing) is shared with the global GameObjectDisplayInfo pass.
+            MangosVmapExtractorService? vmapSvc = null;
             if (enabledPhases.Contains("Vmap"))
             {
-                AddLog("[Vmap] Extracting GAMEOBJECT_MODELS...");
-                var goModelsExtractor = new GameObjectModelsExtractor(_archives, _loggerFactory, vmapDir);
-                int extractedModels = await goModelsExtractor.ExtractAsync(_cts.Token);
-                AddLog($"[Vmap] GAMEOBJECT_MODELS extracted: {extractedModels} models.");
+                // The vmap-extractor manages Buildings/ and vmaps/ internally as
+                // siblings under the output root — matching the C++ original layout
+                // where szWorkDirWmo="./Buildings" and outDir=output_path+"/vmaps".
+                // Pass the root OutputPath, NOT a "vmaps" subdirectory.
+                vmapSvc = new MangosVmapExtractorService(_archives, _loggerFactory, OutputPath);
+            }
+
+            // C++ map-extractor (System.cpp:79): CONF_extract = EXTRACT_MAP | EXTRACT_DBC.
+            // The same console extracts DBC files before maps. We mirror this:
+            // whenever the Map phase is enabled, extract all DBC/DB2 files once
+            // before the per-map loop. This matches the original 3.3.5a behavior
+            // where running map-extractor.exe produces both dbc/ and maps/.
+            if (enabledPhases.Contains("Map"))
+            {
+                string dbcDir = Path.Combine(OutputPath, "dbc");
+                AddLog("[Dbc] Extracting DBC/DB2 files...");
+                var dbcSvc = new DbcExtractorService(_archives, _loggerFactory, dbcDir);
+                int dbcCount = await dbcSvc.ExtractAsync(SelectedLocale, _cts.Token);
+                AddLog($"[Dbc] {dbcCount} DBC/DB2 files extracted.");
             }
 
             foreach (var map in maps)
@@ -562,11 +580,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
                         .ExtractMapAsync((uint)map.MapId, mapName, progress, _cts.Token, onlyTileX, onlyTileY);
                     successfulTiles += tiles;
                 }
-                if (enabledPhases.Contains("Vmap"))
+                if (enabledPhases.Contains("Vmap") && vmapSvc != null)
                 {
                     AddLog($"[Vmap] Extracting {mapName}...");
-                    int tiles = await new VmapExtractorService(_archives, _loggerFactory, vmapDir)
-                        .ExtractMapAsync((uint)map.MapId, mapName, progress, _cts.Token, onlyTileX, onlyTileY);
+                    int tiles = await vmapSvc.ExtractMapAsync((uint)map.MapId, mapName, _cts.Token, onlyTileX, onlyTileY);
                     successfulTiles += tiles;
                 }
                 if (enabledPhases.Contains("Road"))
@@ -580,11 +597,29 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 {
                     AddLog($"[Mmap] Extracting {mapName}...");
                     var recastConfig = new RecastConfig(CellSize, CellHeight, WalkableSlopeAngle, WalkableHeight, WalkableRadius, WalkableClimb);
-                    int tiles = await new MmapExtractorService(_archives, _loggerFactory, mmapDir, recastConfig, ThreadCount, GoSpawnsPath, OffMeshPath, roadDir)
+                    // Mangos-faithful pipeline: terrain is read from .map files
+                    // (Map phase output), buildings from .vmtile + .vmo/.vmd (Vmap
+                    // phase output), gameobject collision from .vmo/.vmd files
+                    // built from the DBC + gameobject_spawns.bin entries.
+                    int tiles = await new MmapExtractorService(_archives, _loggerFactory, mmapDir, recastConfig, ThreadCount, GoSpawnsPath, OffMeshPath, roadDir, OutputPath, mapDir)
                         .ExtractMapAsync((uint)map.MapId, mapName, progress, _cts.Token, onlyTileX, onlyTileY);
                     successfulTiles += tiles;
                 }
             }
+
+            // After all per-map passes are done, extract the GameObject model
+            // .vmo/.vmd collision meshes (mirrors C++ ExtractGameobjectModels
+            // from the vmap-export tool, minus the temp_gameobject_models
+            // index file). The dedup set ensures models that were already
+            // built during the per-map MDDF/MODF pass are not rebuilt.
+            // gameobject_spawns.bin itself is user-provided.
+            if (vmapSvc != null)
+            {
+                AddLog("[Vmap] Extracting GameObject model .vmo/.vmd collision meshes...");
+                int goBuilt = await vmapSvc.ExtractGameObjectModelsAsync(_cts.Token);
+                AddLog($"[Vmap] {goBuilt} GameObject .vmo/.vmd built.");
+            }
+
             if (TotalTiles > 0 && ProcessedTiles >= TotalTiles)
                 Progress = 100;
 

@@ -34,7 +34,12 @@ public class MagicBytesTests
     [Fact]
     public void MapMagic_Wotlk()
     {
-        Assert.Equal(0x76312E35u, MagicBytes.MapMagicWotlk);
+        // Faithful port of MaNGOS C++ ExtractorCommon.cpp::setMapMagicVersion(CLIENT_WOTLK).
+        // The C++ writes the literal "v1.5" (bytes 0x76, 0x31, 0x2E, 0x35), which on
+        // little-endian x86 reads back as the uint32 0x352E3176. The previous test
+        // value 0x76312E35u was byte-reversed (it would be correct only on a
+        // big-endian machine) and never matched the production code.
+        Assert.Equal(0x352E3176u, MagicBytes.MapMagicWotlk);
     }
 
     [Fact]
