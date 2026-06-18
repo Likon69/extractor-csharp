@@ -326,12 +326,22 @@ public sealed class MmapExtractorService
 
         try
         {
-            // ADT bmin in world space — matches C++ getTileBounds(tileX): bmin = (32 - tileX) * GRID_SIZE.
-            // For tileX=32 (map center), bminX = 0. The sub-tile grid bminX..bminX+G then aligns
-            // with the terrain geometry produced by ExtrudeTileGeometry, which uses the
-            // (32 - adjX) * TileSize origin.
-            float bminX = (32 - tileX) * WowConstants.TileSize;
-            float bminZ = (32 - tileY) * WowConstants.TileSize;
+            // ADT bmin in world space — matches C++ getTileBounds(tileX) byte-for-byte
+            // (MapBuilder.cpp:996-1000):
+            //   bmax[0] = (32 - tileX) * GRID_SIZE
+            //   bmin[0] = bmax[0] - GRID_SIZE
+            // For tileX=32, bmaxX = 0, bminX = -GRID_SIZE = -533.33. For tileY=48,
+            // bmaxZ = -16*GRID_SIZE, bminZ = -17*GRID_SIZE = -9066.66.
+            //
+            // The previous code used (32 - tileX) * TileSize which gave 0 for
+            // tileX=32 — that was actually bmaxX, not bminX. The terrain is emitted
+            // at X = [-TileSize, 0] for tileX=32, so the bbox was one whole TileSize
+            // to the east of the actual geometry. Result: the Recast heightfield
+            // only saw the border strip (4× too small), the visible sub-tile was
+            // rotated 90° (border rasterized diagonally), and the position was
+            // off by one TileSize.
+            float bminX = (32 - tileX - 1) * WowConstants.TileSize;
+            float bminZ = (32 - tileY - 1) * WowConstants.TileSize;
 
             var navData = BuildNavMeshSubTilesSync(mapId, geometry, tileX, tileY, maxAdtX, maxAdtY, bminX, bminZ, ct);
             if (navData.All(blob => blob == null || blob.Length == 0))
