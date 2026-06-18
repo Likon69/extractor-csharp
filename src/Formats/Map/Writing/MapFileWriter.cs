@@ -44,6 +44,40 @@ public sealed class MapFileWriter
             for (int x2 = 0; x2 < 129; x2++)
                 liquidHeight[y2, x2] = NoLiq;
 
+        // MCLQ first (C++ System.cpp lignes 827-893). The C++ processes MCLQ before MH2O;
+        // the final liquid_show is the OR of both, and the final liquid_height is MH2O when present.
+        if (tile.ChunkMclqs != null)
+        {
+            for (int ci = 0; ci < Math.Min(256, tile.ChunkMclqs.Length); ci++)
+            {
+                ref readonly var liq = ref tile.ChunkMclqs[ci];
+                if (!liq.HasLiquid) continue;
+                int cr = ci / 16, cc = ci % 16;
+                // MCLQ always covers the full chunk (OffsetX=OffsetY=0, Width=Height=8)
+                // and uses cell->flags for liquid type (not DBC lookup). Don't overwrite
+                // liquidEntry/liquidFlags here — MH2O will overwrite below if present.
+                for (int ly = 0; ly < liq.Height; ly++)
+                    for (int lx = 0; lx < liq.Width; lx++)
+                    {
+                        int bit = ly * liq.Width + lx;
+                        if (liq.ShowMask != 0UL && ((liq.ShowMask >> bit) & 1UL) == 0UL) continue;
+                        int gy = cr * 8 + ly, gx = cc * 8 + lx;
+                        if ((uint)gy < 128 && (uint)gx < 128) liquidShow[gy, gx] = true;
+                    }
+                for (int ly = 0; ly <= liq.Height; ly++)
+                    for (int lx = 0; lx <= liq.Width; lx++)
+                    {
+                        int gy = cr * 8 + ly, gx = cc * 8 + lx;
+                        if ((uint)gy < 129 && (uint)gx < 129)
+                        {
+                            int idx = ly * (liq.Width + 1) + lx;
+                            liquidHeight[gy, gx] = liq.Heights != null && idx < liq.Heights.Length
+                                ? liq.Heights[idx] : liq.MinHeight;
+                        }
+                    }
+            }
+        }
+
         if (tile.ChunkLiquids != null)
         {
             for (int ci = 0; ci < Math.Min(256, tile.ChunkLiquids.Length); ci++)
@@ -53,6 +87,14 @@ public sealed class MapFileWriter
                 int cr = ci / 16, cc = ci % 16;
                 liquidEntry[cr, cc] = liq.RawTypeId;
                 liquidFlags[cr, cc] = liq.TypeFlags;
+                // P0 #6 FIX: dark water — faithful port of MaNGOS C++ System.cpp:
+                //   if (LiqType[h->liquidType] == LIQUID_TYPE_OCEAN) {
+                //       uint8* lm = h2o->getLiquidLightMap(h);
+                //       if (!lm) liquid_flags[i][j] |= MAP_LIQUID_TYPE_DARK_WATER;
+                //   }
+                // LIQUID_TYPE_OCEAN == 0x02 in WotLK MAP_LIQUID_TYPE_* flags.
+                if (liq.TypeFlags == 0x02 && !liq.HasLightmap)
+                    liquidFlags[cr, cc] |= 0x10; // MAP_LIQUID_TYPE_DARK_WATER
 
                 for (int ly = 0; ly < liq.Height; ly++)
                     for (int lx = 0; lx < liq.Width; lx++)
@@ -101,37 +143,80 @@ public sealed class MapFileWriter
                     }
             if (liqMinX > liqMaxX) { liqMinX = liqMinY = 0; liqMaxX = liqMaxY = 0; }
 
-            bool baseFound = false;
-            for (int y2 = 0; y2 < 16 && !baseFound; y2++)
-                for (int x2 = 0; x2 < 16; x2++)
-                    if (liquidFlags[y2, x2] != 0) { liqBaseType = liquidFlags[y2, x2]; baseFound = true; break; }
-
+            // P0 #4 FIX: base type = liquid_flags[0][0], compare ALL 256 (zeros included).
+            // C++ System.cpp uses liquid_flags[0][0] as the base and breaks the moment
+            // any other cell differs — including the zero cells of dry chunks. The
+            // previous C# logic ignored zero values, which wrongly packed mixed
+            // tiles (water + land) as MAP_LIQUID_NO_TYPE.
+            liqBaseType = liquidFlags[0, 0];
             for (int y2 = 0; y2 < 16 && !liqFullType; y2++)
+            {
                 for (int x2 = 0; x2 < 16; x2++)
-                    if (liquidFlags[y2, x2] != 0 && liquidFlags[y2, x2] != liqBaseType)
-                    { liqFullType = true; break; }
+                {
+                    if (liquidFlags[y2, x2] != liqBaseType)
+                    {
+                        liqFullType = true;
+                        break;
+                    }
+                }
+            }
 
             liqW = (byte)(liqMaxX - liqMinX + 2);
             liqH = (byte)(liqMaxY - liqMinY + 2);
 
             liqMinH = float.MaxValue; liqMaxH = float.MinValue;
-            for (int y2 = liqMinY; y2 <= liqMaxY + 1 && y2 < 129; y2++)
-                for (int x2 = liqMinX; x2 <= liqMaxX + 1 && x2 < 129; x2++)
+            // C++ System.cpp: minHeight/maxHeight is computed ONLY over cells where
+            // liquid_show[y][x] is true. Non-visible cells are set to CONF_use_minHeight
+            // and excluded. The previous C# code filtered by `hv > NoLiq` which incorrectly
+            // included non-visible cells that had been written by MCLQ or MH2O height fill
+            // (those fills always write the 9x9 region regardless of the show mask).
+            for (int y2 = liqMinY; y2 <= liqMaxY && y2 < 128; y2++)
+                for (int x2 = liqMinX; x2 <= liqMaxX && x2 < 128; x2++)
                 {
+                    if (!liquidShow[y2, x2]) continue;
                     float hv = liquidHeight[y2, x2];
                     if (hv > NoLiq) { if (hv < liqMinH) liqMinH = hv; if (hv > liqMaxH) liqMaxH = hv; }
                 }
             if (liqMinH > liqMaxH) liqMinH = liqMaxH = 0f;
 
             if (!liqFullType) liqHdrFlags |= LiquidMapHeader.NoType;
-            if (liqMaxH - liqMinH < 0.001f) liqHdrFlags |= LiquidMapHeader.NoHeightValues;
+            // P1.2 FIX: match MaNGOS C++ exactly. With CONF_allow_float_to_int=false
+            // (the default), MAP_LIQUID_NO_HEIGHT is only set when maxHeight == minHeight
+            // (truly flat). The previous `< 0.001f` was a C# invention that broke
+            // byte-for-byte compatibility with the C++ output.
+            if (liqMaxH == liqMinH) liqHdrFlags |= LiquidMapHeader.NoHeightValues;
         }
 
         // ── Step 3: Compute section offsets ───────────────────────────────
+        // P1.1 FIX: AREA packing — mirror MaNGOS C++ System.cpp:
+        //   if all 256 area flags are equal, write only the 8-byte header
+        //   with MAP_AREA_NO_AREA set and gridArea = the common value
+        //   (saves 512 bytes per tile for zones that don't split).
+        bool allSameArea = true;
+        ushort firstArea = 0;
+        if (tile.AreaMap != null && tile.AreaMap.Length >= 256)
+        {
+            firstArea = tile.AreaMap[0];
+            for (int i = 1; i < 256; i++)
+            {
+                if (tile.AreaMap[i] != firstArea) { allSameArea = false; break; }
+            }
+        }
+        ushort areaHdrFlags = allSameArea ? AreaMapHeader.NoArea : (ushort)0;
+        ushort areaGridArea = allSameArea ? firstArea : (ushort)0;
+
+        // P0 #5 FIX: MAP_HEIGHT_NO_HEIGHT when the tile is exactly flat
+        // (maxHeight == minHeight). With CONF_allow_float_to_int=false (the C++
+        // default), the C++ extractor skips the 132100-byte V9+V8 array and writes
+        // only the 16-byte header — saving 128 KB per flat tile. The previous C#
+        // code always wrote the full V9+V8, which broke byte-for-byte output.
+        bool heightIsFlat = tile.MinHeight == tile.MaxHeight;
+        uint heightHdrFlags = heightIsFlat ? HeightMapHeader.NoHeight : 0u;
+
         const uint areaMapOffset  = 44u;
-        const uint areaMapSize    = 8u + 256u * 2u;
-        const uint heightMapOffset = areaMapOffset + areaMapSize;
-        const uint heightMapSize   = 16u + (129u * 129u + 128u * 128u) * 4u;
+        uint areaMapSize          = allSameArea ? AreaMapHeader.Size : (AreaMapHeader.Size + 256u * 2u);
+        uint heightMapOffset      = areaMapOffset + areaMapSize;
+        uint heightMapSize        = heightIsFlat ? HeightMapHeader.Size : (HeightMapHeader.Size + (129u * 129u + 128u * 128u) * 4u);
 
         uint liquidMapOffset, liquidMapSize;
         if (!anyLiquid) { liquidMapOffset = 0u; liquidMapSize = 0u; }
@@ -162,21 +247,27 @@ public sealed class MapFileWriter
         writer.Write(holesOffset);
         writer.Write(holesSize);
 
-        // Area section
+        // Area section (P1.1: packed when all 256 chunks share the same flag)
         writer.Write(0x41455241u); // "AREA"
-        writer.Write((ushort)0);   // flags
-        writer.Write((ushort)0);   // gridArea
-        for (int z = 0; z < 16; z++)
-            for (int x = 0; x < 16; x++)
-                writer.Write(tile.AreaMap != null ? tile.AreaMap[z * 16 + x] : (ushort)0);
+        writer.Write(areaHdrFlags);
+        writer.Write(areaGridArea);
+        if ((areaHdrFlags & AreaMapHeader.NoArea) == 0)
+        {
+            for (int z = 0; z < 16; z++)
+                for (int x = 0; x < 16; x++)
+                    writer.Write(tile.AreaMap != null ? tile.AreaMap[z * 16 + x] : (ushort)0);
+        }
 
-        // Height section
+        // Height section (P0 #5: header only when MAP_HEIGHT_NO_HEIGHT is set)
         writer.Write(MagicBytes.HeightMapMagic);
-        writer.Write(0u);
+        writer.Write(heightHdrFlags);
         writer.Write(tile.MinHeight);
         writer.Write(tile.MaxHeight);
-        foreach (var h in BuildV9Heights(tile)) writer.Write(h);
-        foreach (var h in BuildV8Heights(tile)) writer.Write(h);
+        if ((heightHdrFlags & HeightMapHeader.NoHeight) == 0)
+        {
+            foreach (var h in BuildV9Heights(tile)) writer.Write(h);
+            foreach (var h in BuildV8Heights(tile)) writer.Write(h);
+        }
 
         // Liquid section (only when liquid is present)
         if (anyLiquid)
@@ -278,22 +369,52 @@ public sealed class MapFileWriter
             MaxHeight = float.MinValue
         };
 
-        var heights = new List<float>(256 * AdtMcvt.TotalVertices);
+        // P0 #5 FIX: apply the MaNGOS C++ CONF_use_minHeight clamp (-500) to every
+        // V8/V9 value BEFORE computing min/max. C++ System.cpp:
+        //   if (CONF_allow_height_limit && minHeight < CONF_use_minHeight) {
+        //       for (...) if (V8[y][x] < CONF_use_minHeight) V8[y][x] = CONF_use_minHeight;
+        //       for (...) if (V9[y][x] < CONF_use_minHeight) V9[y][x] = CONF_use_minHeight;
+        //       if (minHeight < CONF_use_minHeight) minHeight = CONF_use_minHeight;
+        //       if (maxHeight < CONF_use_minHeight) maxHeight = CONF_use_minHeight;
+        //   }
+        // This is what makes deep-ocean tiles (raw heights ~-515) collapse to
+        // exactly -500, allowing MAP_HEIGHT_NO_HEIGHT to kick in. Without it,
+        // every ocean tile loses the 128 KB height-pack optimization and the
+        // C# output diverges byte-for-byte from the C++ reference.
+        const float MinHeightClamp = -500.0f;
+
+        // Faithful port of MaNGOS C++ System.cpp::ConvertADT: every MCVT vertex
+        // produces exactly one V9 or V8 entry — no filtering, no skipping. The
+        // previous `if (h > -9000f)` guard was a C# invention that broke
+        // byte-for-byte parity whenever a single height was below -9000: the
+        // resulting List<float> was shorter than 256 * AdtMcvt.TotalVertices
+        // (37200), which then triggered the safety net in BuildV9Heights /
+        // BuildV8Heights that fills the entire V9/V8 grid with 0f, silently
+        // corrupting up to 128 KB of the output .map file.
+        var heights = new float[256 * AdtMcvt.TotalVertices];
         for (int i = 0; i < 256; i++)
         {
             var chunkHeights = adt.GetChunkHeights(i);
-            foreach (var h in chunkHeights)
+            chunkHeights.CopyTo(heights.AsSpan(i * AdtMcvt.TotalVertices, AdtMcvt.TotalVertices));
+            for (int j = 0; j < chunkHeights.Length; j++)
             {
-                if (h > -9000f)
-                {
-                    heights.Add(h);
-                    if (h < tile.MinHeight) tile.MinHeight = h;
-                    if (h > tile.MaxHeight) tile.MaxHeight = h;
-                }
+                // Clamp first, then track min/max (matches C++ exactly).
+                float ch = chunkHeights[j] < MinHeightClamp ? MinHeightClamp : chunkHeights[j];
+                heights[i * AdtMcvt.TotalVertices + j] = ch;
+                if (ch < tile.MinHeight) tile.MinHeight = ch;
+                if (ch > tile.MaxHeight) tile.MaxHeight = ch;
             }
         }
 
-        tile.HeightMap = heights.ToArray();
+        tile.HeightMap = heights;
+
+        // P0 FIX: populate the per-chunk holes bitmask from the ADT's MCNK.holes
+        // (was previously always 0). The C++ map-extractor writes
+        // <c>map_fileheader.holes[i][j] = cell->holes</c> directly.
+        var holes = new ushort[256];
+        for (int i = 0; i < 256; i++)
+            holes[i] = adt.GetChunkHoles(i);
+        tile.HolesMap = holes;
 
         // BUG-005: populate per-chunk liquid data from MH2O
         var chunkLiquids = new MapLiquidCell[256];
@@ -303,18 +424,48 @@ public sealed class MapFileWriter
             if (!l.HasLiquid) continue;
             chunkLiquids[i] = new MapLiquidCell
             {
-                RawTypeId = l.RawTypeId,
-                TypeFlags  = (byte)l.PrimaryType,
-                MinHeight  = l.LiquidLevel,
-                OffsetX    = l.OffsetX,
-                OffsetY    = l.OffsetY,
-                Width      = l.Width,
-                Height     = l.Height,
-                Heights    = l.DepthMap,
-                ShowMask   = l.ShowMask
+                RawTypeId    = l.RawTypeId,
+                TypeFlags     = (byte)l.PrimaryType,
+                MinHeight     = l.LiquidLevel,
+                OffsetX       = l.OffsetX,
+                OffsetY       = l.OffsetY,
+                Width         = l.Width,
+                Height        = l.Height,
+                Heights       = l.DepthMap,
+                ShowMask      = l.ShowMask,
+                VertexFormat  = l.VertexFormat,
+                OfsInfoMask   = l.OfsInfoMask
             };
         }
         tile.ChunkLiquids = chunkLiquids;
+
+        // MCLQ legacy path (MaNGOS C++ System.cpp lignes 827-893). MCLQ is still embedded
+        // in some WotLK MCNK chunks. The C++ processes it BEFORE MH2O and the final
+        // liquid_show is the OR of both — without this, the bounding box misses cells
+        // covered only by MCLQ (e.g. tile 32,48 chunk (15,5) where minX drops from 47 to 48).
+        var chunkMclqs = new MapLiquidCell[256];
+        bool anyMclq = false;
+        for (int i = 0; i < 256; i++)
+        {
+            ref readonly var l = ref adt.GetMclqData(i);
+            if (!l.HasLiquid) continue;
+            anyMclq = true;
+            chunkMclqs[i] = new MapLiquidCell
+            {
+                RawTypeId    = l.RawTypeId,
+                TypeFlags     = (byte)l.PrimaryType,
+                MinHeight     = l.LiquidLevel,
+                OffsetX       = l.OffsetX,
+                OffsetY       = l.OffsetY,
+                Width         = l.Width,
+                Height        = l.Height,
+                Heights       = l.DepthMap,
+                ShowMask      = l.ShowMask,
+                VertexFormat  = l.VertexFormat,
+                OfsInfoMask   = l.OfsInfoMask
+            };
+        }
+        tile.ChunkMclqs = anyMclq ? chunkMclqs : null;
 
         return tile;
     }

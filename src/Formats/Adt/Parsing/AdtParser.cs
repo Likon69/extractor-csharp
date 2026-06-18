@@ -60,7 +60,9 @@ public sealed class AdtParser
             return AdtParseResult.Failed(warnings);
         }
 
-        uint magic = reader.ReadUInt32();
+        // First 4 bytes are the MVER chunk magic, stored REVERSED on disk
+        // (MaNGOS adtfile.cpp::flipcc). Flip before comparing.
+        uint magic = ReverseChunkMagic(reader.ReadUInt32());
         if (magic != MagicBytes.Mver)
         {
             warnings.Add($"Invalid ADT magic: expected MVER (0x{MagicBytes.Mver:X}), got 0x{magic:X}");
@@ -75,7 +77,11 @@ public sealed class AdtParser
 
         while (reader.Remaining >= 8 && !stopRootScan)
         {
-            uint chunkMagic = reader.ReadUInt32();
+            // ADT files store chunk magics REVERSED on disk (MaNGOS
+            // adtfile.cpp::flipcc reverses each 4-byte magic after reading).
+            // Read 4 bytes, then byte-swap to get canonical "ABCD" order
+            // before comparing against MagicBytes constants.
+            uint chunkMagic = ReverseChunkMagic(reader.ReadUInt32());
             uint chunkSize = reader.ReadUInt32();
 
             switch (chunkMagic)
@@ -187,6 +193,8 @@ public sealed class AdtParser
         float[] allHeights = new float[256 * AdtMcvt.TotalVertices];
         ushort[] areaIds = new ushort[256];
         LiquidData[] liquids = new LiquidData[256];
+        LiquidData[] mclqs = new LiquidData[256]; // MCLQ fallback (C++ System.cpp lignes 827-893)
+        ushort[] chunkHoles = new ushort[256]; // P0 FIX: MCNK.holes per chunk (mirrors C++ map_fileheader.holes[16][16])
 
         // Parse liquid data for all 256 cells from MH2O chunk
         if (waterData.HasValue && mcinEntries.Length == 256)
@@ -224,6 +232,12 @@ public sealed class AdtParser
             chunkResult.Heights.CopyTo(heightSpan);
             areaIds[i] = chunkResult.AreaId;
             liquids[i] = chunkResult.Liquid;
+            // MCLQ : C++ System.cpp traite MCLQ pour TOUS les chunks (puis MH2O écrase).
+            // Le C# doit aussi stocker MCLQ même si MH2O a des données, car MCLQ peut
+            // ajouter des cellules visibles que MH2O n'a pas (ex: tile 32,48 chunk (15,5)).
+            if (chunkResult.Mclq.HasLiquid)
+                mclqs[i] = chunkResult.Mclq;
+            chunkHoles[i] = chunkResult.Holes;
         }
 
         var mddf = header.MddfOffset > 0 ? ParseMddf(reader, mhdrOffset + header.MddfOffset) : Array.Empty<AdtMddf>();
@@ -242,7 +256,7 @@ public sealed class AdtParser
         var tile = new AdtFile(
             mapId, tileX, tileY, path, header, mcinEntries, mfbo,
             textures, wmos, models, mddf, modf,
-            allHeights, areaIds, liquids, chunkTextureIds);
+            allHeights, areaIds, liquids, mclqs, chunkTextureIds, chunkHoles);
 
         return new AdtParseResult(tile, warnings);
     }
@@ -254,7 +268,9 @@ public sealed class AdtParser
 
         reader.Seek((int)instanceOffset);
 
-        // Read SLiquidInstance in exact WotLK binary order (20 bytes total)
+        // Read SLiquidInstance in exact WotLK binary order (24 bytes total)
+        // C++ adt_liquid_header has: ... width, height, offsData2a (show mask), offsData2b (height map).
+        // CRITICAL: offsData2a (show mask) comes FIRST, offsData2b (height map) comes SECOND.
         ushort liquidType  = reader.ReadUInt16();
         ushort vertexFormat = reader.ReadUInt16();
         float  minHeight   = reader.ReadFloat();
@@ -263,21 +279,23 @@ public sealed class AdtParser
         byte   offsetY     = reader.ReadByte();
         byte   width       = reader.ReadByte();
         byte   height      = reader.ReadByte();
-        uint   ofsHeightMap = reader.ReadUInt32();
-        uint   ofsInfoMask  = reader.ReadUInt32();
+        uint   ofsInfoMask  = reader.ReadUInt32();  // offsData2a — 64-bit show mask
+        uint   ofsHeightMap = reader.ReadUInt32();  // offsData2b — height float array
 
         if (width == 0 || height == 0)
             return LiquidData.Empty;
 
         var liquid = new LiquidData
         {
-            LiquidLevel = minHeight,
-            RawTypeId   = liquidType,
-            PrimaryType = AdtFile.LiquidTypeToFlags(liquidType),
-            OffsetX     = offsetX,
-            OffsetY     = offsetY,
-            Width       = width,
-            Height      = height
+            LiquidLevel  = minHeight,
+            RawTypeId    = liquidType,
+            PrimaryType  = AdtFile.LiquidTypeToFlags(liquidType),
+            VertexFormat = vertexFormat,
+            OfsInfoMask  = ofsInfoMask,
+            OffsetX      = offsetX,
+            OffsetY      = offsetY,
+            Width        = width,
+            Height       = height
         };
 
         // Read 64-bit show mask (8 bytes = 64 bits, bit[y*Width+x] = sub-cell visible)
@@ -288,6 +306,8 @@ public sealed class AdtParser
             for (int b = 0; b < 8; b++)
                 mask |= (ulong)reader.ReadByte() << (b * 8);
             liquid.ShowMask = mask;
+            if ((instanceOffset & 0xFFFF) < 0x10) Console.Error.WriteLine($"[DBG-MH2O] cell@{instanceOffset:X} ofsInfoMask=0x{ofsInfoMask:X8} base=0x{mh2oDataBase:X8} target=0x{(mh2oDataBase+ofsInfoMask):X8} mask=0x{mask:X16}");
+            if (mask == 0x430FFD2A430FFD2AUL) Console.Error.WriteLine($"[DBG-DUP] ofsInfoMask=0x{ofsInfoMask:X8} same mask!");
         }
         else
         {
@@ -313,7 +333,7 @@ public sealed class AdtParser
         int savedPos = reader.Position;
         reader.Seek(mcnkOffset);
 
-        uint magic = reader.ReadUInt32();
+        uint magic = ReverseChunkMagic(reader.ReadUInt32());
         if (magic != MagicBytes.Mcnk)
         {
             reader.Seek(savedPos);
@@ -368,7 +388,7 @@ public sealed class AdtParser
     {
         reader.Seek((int)offset);
 
-        uint magic = reader.ReadUInt32();
+        uint magic = ReverseChunkMagic(reader.ReadUInt32());
         if (magic != MagicBytes.Mcin)
             throw new InvalidDataException($"Expected MCIN, got {MagicBytes.FourCCToString(magic)}");
 
@@ -495,7 +515,7 @@ public sealed class AdtParser
     {
         reader.Seek((int)offset);
 
-        uint magic = reader.ReadUInt32();
+        uint magic = ReverseChunkMagic(reader.ReadUInt32());
         if (magic != MagicBytes.Mh2o)
             return null;
 
@@ -519,16 +539,16 @@ public sealed class AdtParser
         return h2o;
     }
 
-    private (float[] Heights, ushort AreaId, LiquidData Liquid) ParseMcnk(
+    private (float[] Heights, ushort AreaId, LiquidData Liquid, ushort Holes, LiquidData Mclq) ParseMcnk(
         SpanReader reader, int startOffset, int chunkSize, LiquidData? waterData, List<string> warnings)
     {
         reader.Seek(startOffset);
 
-        uint magic = reader.ReadUInt32();
+        uint magic = ReverseChunkMagic(reader.ReadUInt32());
         if (magic != MagicBytes.Mcnk)
         {
             warnings.Add($"MCNK at {startOffset} has invalid magic: {MagicBytes.FourCCToString(magic)}");
-            return (new float[AdtMcvt.TotalVertices], 0, waterData ?? LiquidData.Empty);
+            return (new float[AdtMcvt.TotalVertices], 0, waterData ?? LiquidData.Empty, 0, LiquidData.Empty);
         }
 
         reader.Skip(4); // size (already known)
@@ -574,6 +594,12 @@ public sealed class AdtParser
             Unused2        = reader.ReadUInt32(), // 0x7C
         };
 
+        // Faithful port of MaNGOS C++ System.cpp::ConvertADT: V9 and V8 are
+        // first initialized to cell->ypos (= chunk base altitude), then the
+        // += MCVT loop is applied when the MCVT chunk is present. The C#
+        // previously left the array at all-zeros when OfsHeight was 0, which
+        // collapsed WMO-only / dummy MCNK tiles to sea level and produced
+        // byte-for-byte divergence from the C++ reference.
         float[] heights = new float[AdtMcvt.TotalVertices];
         if (header.OfsHeight > 0)
         {
@@ -583,8 +609,113 @@ public sealed class AdtParser
             for (int i = 0; i < AdtMcvt.TotalVertices; i++)
                 heights[i] = header.Ypos + reader.ReadFloat(); // Ypos = world Y = height base
         }
+        else
+        {
+            Array.Fill(heights, header.Ypos);
+        }
 
-        return (heights, (ushort)header.AreaId, waterData ?? LiquidData.Empty);
+        return (heights, (ushort)header.AreaId, waterData ?? ParseMclq(reader, startOffset, in header) ?? LiquidData.Empty, (ushort)(header.Holes & 0xFFFFu), ParseMclq(reader, startOffset, in header) ?? LiquidData.Empty);
+    }
+
+    /// <summary>
+    /// Port fidèle de MaNGOS System.cpp lignes 827-893 (chemin MCLQ "old").
+    /// MCLQ est encore présent dans certains chunks WotLK. Le C++ le traite
+    /// AVANT MH2O — MH2O écrase si présent. Ici on l'utilise quand MH2O n'a rien.
+    /// </summary>
+    private LiquidData? ParseMclq(SpanReader reader, int mcnkStart, in AdtMcnk header)
+    {
+        if (header.OfsLiquid == 0 || header.SizeLiquid <= 8)
+            return null;
+
+        // MCLQ layout (adt.h adt_MCLQ):
+        //   fcc(4) + size(4) + height1(4) + height2(4) = 16 bytes header
+        //   liquid[9][9] : { uint32 light; float height; } = 8 bytes each → 9*9*8 = 648 bytes
+        //   flags[8][8] : uint8 = 64 bytes
+        //   data[84] : uint8
+        int mclqStart = mcnkStart + (int)header.OfsLiquid;
+        const int DataStart = 16; // skip fcc+size+height1+height2
+        const int LiquidEntrySize = 8;
+        const int GridFull = 9;
+        const int FlagGrid = 8;
+
+        // Read 9x9 height grid (only the 'height' float, skip 'light' uint32)
+        var heights = new float[GridFull * GridFull];
+        int heightGridStart = mclqStart + DataStart;
+        for (int y = 0; y < GridFull; y++)
+        {
+            for (int x = 0; x < GridFull; x++)
+            {
+                int pos = heightGridStart + (y * GridFull + x) * LiquidEntrySize;
+                reader.Seek(pos + 4); // skip 'light' uint32
+                heights[y * GridFull + x] = reader.ReadFloat();
+            }
+        }
+
+        // Read 8x8 flag grid
+        int flagOffset = mclqStart + DataStart + GridFull * GridFull * LiquidEntrySize;
+        reader.Seek(flagOffset);
+        Span<byte> flags = stackalloc byte[FlagGrid * FlagGrid];
+        for (int i = 0; i < flags.Length; i++)
+            flags[i] = reader.ReadByte();
+
+        // Build show mask: flags[y][x] != 0x0F means visible
+        int count = 0;
+        ulong showMask = 0UL;
+        bool hasDarkWater = false;
+        for (int y = 0; y < FlagGrid; y++)
+        {
+            for (int x = 0; x < FlagGrid; x++)
+            {
+                byte f = flags[y * FlagGrid + x];
+                if (f != 0x0F)
+                {
+                    showMask |= 1UL << (y * FlagGrid + x);
+                    count++;
+                }
+                if ((f & 0x80) != 0)
+                    hasDarkWater = true;
+            }
+        }
+
+        if (count == 0)
+            return null;
+
+        // Type from MCNK.flags bits 2,3,4 (System.cpp lignes 862-877)
+        //   bit 2 → water (entry=1)
+        //   bit 3 → ocean (entry=2)
+        //   bit 4 → magma (entry=3)
+        uint cFlag = header.Flags;
+        ushort rawTypeId;
+        LiquidType liquidType;
+        if ((cFlag & (1u << 4)) != 0) { rawTypeId = 3; liquidType = LiquidType.Magma; }
+        else if ((cFlag & (1u << 3)) != 0) { rawTypeId = 2; liquidType = LiquidType.Ocean; }
+        else if ((cFlag & (1u << 2)) != 0) { rawTypeId = 1; liquidType = LiquidType.Water; }
+        else return null; // flags sans bit 2/3/4 → pas de liquide valide
+
+        byte typeFlags = (byte)liquidType;
+        if (hasDarkWater && liquidType == LiquidType.Ocean)
+            typeFlags |= 0x10; // MAP_LIQUID_TYPE_DARK_WATER
+
+        // MinHeight = min des heights du MCLQ (utilisé par liquidLevel du header)
+        float minH = float.MaxValue;
+        for (int i = 0; i < heights.Length; i++)
+            if (heights[i] < minH) minH = heights[i];
+        if (minH == float.MaxValue) minH = 0f;
+
+        return new LiquidData
+        {
+            RawTypeId = rawTypeId,
+            PrimaryType = (LiquidType)typeFlags,
+            LiquidLevel = minH,
+            OffsetX = 0,
+            OffsetY = 0,
+            Width = FlagGrid,
+            Height = FlagGrid,
+            DepthMap = heights,
+            ShowMask = showMask,
+            VertexFormat = 0,
+            OfsInfoMask = 0
+        };
     }
 
     private AdtMddf[] ParseMddf(SpanReader reader, uint offset)
@@ -594,7 +725,7 @@ public sealed class AdtParser
 
         reader.Seek((int)offset);
 
-        uint magic = reader.ReadUInt32();
+        uint magic = ReverseChunkMagic(reader.ReadUInt32());
         if (magic != MagicBytes.Mddf)
             return Array.Empty<AdtMddf>();
 
@@ -629,7 +760,7 @@ public sealed class AdtParser
 
         reader.Seek((int)offset);
 
-        uint magic = reader.ReadUInt32();
+        uint magic = ReverseChunkMagic(reader.ReadUInt32());
         if (magic != MagicBytes.Modf)
             return Array.Empty<AdtModf>();
 
@@ -666,4 +797,18 @@ public sealed class AdtParser
     }
 
     public void ClearCache() => _cache.Clear();
+
+    /// <summary>
+    /// ADT files store chunk magics REVERSED on disk (MaNGOS adtfile.cpp::flipcc
+    /// reverses the 4 bytes after each Read). This swaps the 4 bytes of
+    /// <paramref name="reversed"/> back to canonical "ABCD" order so the value
+    /// can be compared against MagicBytes constants (MCNK, MHDR, MTEX, …).
+    /// </summary>
+    private static uint ReverseChunkMagic(uint reversed)
+    {
+        return ((reversed & 0x000000FFu) << 24)
+             | ((reversed & 0x0000FF00u) << 8)
+             | ((reversed & 0x00FF0000u) >> 8)
+             | ((reversed & 0xFF000000u) >> 24);
+    }
 }

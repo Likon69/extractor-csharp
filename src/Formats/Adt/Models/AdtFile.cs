@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using MaNGOS.Extractor.Core.Binary;
 using MaNGOS.Extractor.Core.Constants;
 using MaNGOS.Extractor.Core.Interfaces;
 using MaNGOS.Extractor.Formats.Dbc;
@@ -21,7 +22,11 @@ public sealed class AdtFile
         foreach (var row in reader.Rows)
         {
             ushort areaId = (ushort)row.Id;
-            uint flags = reader.GetUInt32(row, 4);
+            // P0 FIX: Mangos C++ System.cpp uses getUInt(3) for the area bit/flag
+            // (line "areas[dbc.getRecord(x).getUInt(0)] = dbc.getRecord(x).getUInt(3);").
+            // The C# DbcReader is 0-indexed like the C++ getUInt(), so field 3 (0-indexed)
+            // is the same byte offset the C++ reads.
+            uint flags = reader.GetUInt32(row, 3);
             uint team = reader.GetUInt32(row, 28);
             AreaTableLookup[areaId] = (flags, team);
         }
@@ -30,19 +35,38 @@ public sealed class AdtFile
     public static void LoadLiquidTypeTable(IArchiveReader archive)
     {
         if (!archive.TryReadFile("DBFilesClient\\LiquidType.dbc", out var data)) return;
-        var reader = DbcReader<LiquidTypeRow>.Parse(data.Span);
-        foreach (var row in reader.Rows)
+        // Read raw DBC data: the LiquidTypeRow struct only contains Id (4 bytes)
+        // but field 3 (SoundBank) lives at offset 12 of the record. The DbcReader<>
+        // indexer would read padding bytes instead. We mirror the C++ DBCFile::getUInt(3)
+        // by reading the raw record bytes directly.
+        var reader = new SpanReader(data.Span);
+        uint magic = reader.ReadUInt32();
+        if (magic != MagicBytes.DbcMagic) return;
+        uint recordCount = reader.ReadUInt32();
+        uint fieldCount = reader.ReadUInt32();
+        uint rowSize = reader.ReadUInt32();
+        reader.Skip(4); // stringBlockSize
+        for (uint i = 0; i < recordCount; i++)
         {
-            ushort id = (ushort)row.Id;
-            uint soundBank = reader.GetUInt32(row, 3); // field 3 = SoundBank
+            int recordPos = reader.Position;
+            // Each DBC field is 4 bytes. field 0 = Id, field 3 = SoundBank.
+            // MaNGOS C++ System.cpp::ReadLiquidTypeTableDBC uses getUInt(3).
+            uint id = reader.ReadUInt32();
+            reader.Skip(8); // skip fields 1, 2
+            uint soundBank = reader.ReadUInt32(); // field 3
+            // Skip remaining fields in this record
+            reader.Seek(recordPos + (int)rowSize);
+
+            // WOTLK MAP_LIQUID_TYPE_* values (System.cpp CLIENT_WOTLK branch):
+            //   SoundBank 0 (WATER) -> 0x01, 1 (OCEAN) -> 0x02, 2 (MAGMA) -> 0x04, 3 (SLIME) -> 0x08
             byte flag = soundBank switch {
-                0 => 0x08, // WATER
+                0 => 0x01, // WATER
                 1 => 0x02, // OCEAN
-                2 => 0x01, // MAGMA
-                3 => 0x04, // SLIME
-                _ => 0x08
+                2 => 0x04, // MAGMA
+                3 => 0x08, // SLIME
+                _ => 0x01  // default = WATER
             };
-            LiquidTypeLookup[id] = flag;
+            LiquidTypeLookup[(ushort)id] = flag;
         }
     }
 
@@ -64,7 +88,9 @@ public sealed class AdtFile
     private readonly float[] _heights;
     private readonly ushort[] _areaIds;
     private readonly LiquidData[] _liquids;
+    private readonly LiquidData[] _mclqs;
     private readonly uint[] _chunkTextureIds; // MCLY: which texture each MCNK uses
+    private readonly ushort[] _chunkHoles;    // P0 FIX: MCNK.holes per chunk (mirrors C++ map_fileheader.holes[16][16])
 
     /// <summary>Map ID this tile belongs to.</summary>
     public uint MapId { get; }
@@ -158,6 +184,16 @@ public sealed class AdtFile
     }
 
     /// <summary>
+    /// Gets legacy MCLQ liquid data for a specific chunk (MaNGOS C++ System.cpp lignes 827-893).
+    /// MCLQ is the "old" TBC liquid format still embedded in some WotLK MCNK chunks. The C++ processes
+    /// it BEFORE MH2O and the final liquid_show is the OR of both. Empty if no MCLQ data for this chunk.
+    /// </summary>
+    public ref readonly LiquidData GetMclqData(int chunkIndex)
+    {
+        return ref _mclqs[chunkIndex < 256 ? chunkIndex : 0];
+    }
+
+    /// <summary>
     /// Gets the world-space height at a specific position.
     /// </summary>
     /// <param name="worldX">World X coordinate.</param>
@@ -212,7 +248,8 @@ public sealed class AdtFile
         string[] textures, string[] wmos, string[] models,
         AdtMddf[] doodads, AdtModf[] wmosPlacements,
         float[] heights, ushort[] areaIds, LiquidData[] liquids,
-        uint[] chunkTextureIds)
+        LiquidData[] mclqs,
+        uint[] chunkTextureIds, ushort[] chunkHoles)
     {
         MapId = mapId;
         TileX = tileX;
@@ -229,7 +266,9 @@ public sealed class AdtFile
         _heights = heights;
         _areaIds = areaIds;
         _liquids = liquids;
+        _mclqs = mclqs ?? new LiquidData[256];
         _chunkTextureIds = chunkTextureIds ?? new uint[256];
+        _chunkHoles = chunkHoles ?? new ushort[256];
     }
 
     /// <summary>Returns true if the given texture name contains road-like patterns.</summary>
@@ -260,6 +299,16 @@ public sealed class AdtFile
     /// <summary>Gets the primary texture ID of a MCNK chunk (MCLY index 0).</summary>
     public uint GetChunkTextureId(int chunkIndex) =>
         (uint)(chunkIndex >= 0 && chunkIndex < 256 ? _chunkTextureIds[chunkIndex] : 0);
+
+    /// <summary>
+    /// Gets the MCNK holes bitmask for a specific chunk (P0 FIX: was previously
+    /// never populated, causing MapFileWriter to write all zeros). The 16-bit
+    /// bitmask indicates which of the 8×8 sub-cells inside the chunk are
+    /// "holes" (no ground) — the same value the C++ map-extractor writes to
+    /// <c>map_fileheader.holes</c>.
+    /// </summary>
+    public ushort GetChunkHoles(int chunkIndex)
+        => (ushort)(chunkIndex >= 0 && chunkIndex < 256 ? _chunkHoles[chunkIndex] : 0);
 }
 
 /// <summary>
