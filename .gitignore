@@ -23,3 +23,11 @@ ExtractorConfig.json
 
 # Test
 TestResults/gameobject_spawns.bin
+
+# Windows null device accidents
+nul
+**/nul
+
+# Build artefact (legacy WIP)
+build/
+output_test/
