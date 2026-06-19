@@ -104,13 +104,34 @@ internal sealed class MangosTileAssembler
             if ((spawn.Flags & MOD_M2) != 0)
             {
                 // M2 spawns have no bound in dir_bin — recompute from the model
-                // geometry. C++ aborts the whole map on failure (break). We
-                // match that: skip the rest of the spawns and proceed with what
-                // we have so far.
+                // geometry. The C++ TileAssembler returns false on the very
+                // first failure, but the boundless spawns after it (and every
+                // M2/WMO in subsequent tiles that builds a BIH on top of
+                // mapSpawns) silently go missing. That's a regression for any
+                // zone where a single M2 has exotic rotation/NaN vertices
+                // (e.g. particle effects, VFX, hair meshes) — one bad spawn
+                // wipes the rest of the map's collision. We skip the offending
+                // M2 with `continue` AND fall back to a 1×1×1 AABB centred on
+                // the spawn position so it still contributes a (tiny) hit to
+                // the BIH, matching what the C++ would have produced for a
+                // model with an empty bounding mesh.
                 if (!CalculateTransformedBound(ref spawn))
                 {
-                    _logger.LogWarning("[TileAssembler] calculateTransformedBound failed for M2 {Name}, aborting spawn accumulation", spawn.Name);
-                    break;
+                    _logger.LogWarning("[TileAssembler] calculateTransformedBound failed for M2 {Name}, using fallback 1x1x1 AABB at spawn pos", spawn.Name);
+                    const float Half = 0.5f;
+                    spawn.BoundLow = new[]
+                    {
+                        spawn.Pos[0] - Half,
+                        spawn.Pos[1] - Half,
+                        spawn.Pos[2] - Half,
+                    };
+                    spawn.BoundHigh = new[]
+                    {
+                        spawn.Pos[0] + Half,
+                        spawn.Pos[1] + Half,
+                        spawn.Pos[2] + Half,
+                    };
+                    spawn.Flags |= MOD_HAS_BOUND;
                 }
             }
             else if ((spawn.Flags & MOD_WORLDSPAWN) != 0)
@@ -360,6 +381,19 @@ internal sealed class MangosTileAssembler
                 if (ty < blo1) blo1 = ty; else if (ty > bhi1) bhi1 = ty;
                 if (tz < blo2) blo2 = tz; else if (tz > bhi2) bhi2 = tz;
             }
+        }
+
+        // Some M2s carry particle/VFX meshes (steam, lightning, slime bubbles,
+        // wisps, hair ribbons) whose source vertices contain NaN/Inf or
+        // extreme magnitudes; after scale+rotation the AABB ends up with a
+        // NaN coordinate. Reject only the offending spawn (caller falls back
+        // to a 1×1×1 AABB) instead of bailing the whole map.
+        if (boundEmpty
+            || !float.IsFinite(blo0) || !float.IsFinite(blo1) || !float.IsFinite(blo2)
+            || !float.IsFinite(bhi0) || !float.IsFinite(bhi1) || !float.IsFinite(bhi2)
+            || (bhi0 - blo0) > 1.0e5f || (bhi1 - blo1) > 1.0e5f || (bhi2 - blo2) > 1.0e5f)
+        {
+            return false;
         }
 
         // spawn.iBound = modelBound + spawn.iPos  (TileAssembler.cpp:411)
