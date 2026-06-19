@@ -295,10 +295,15 @@ bool BuildTile(
         navParams.detailTris       = dmesh->tris;
         navParams.detailTriCount   = dmesh->ntris;
     }
-    // Use the full sub-tile bbox from params (includes border) — matches rcVcopy(params.bmin,bmin)
-    // in MapBuilder.cpp rather than reading back from the merged poly mesh.
-    memcpy(navParams.bmin, bmin, sizeof(float) * 3);
-    memcpy(navParams.bmax, bmax, sizeof(float) * 3);
+    // Use the CORE sub-tile bounds (without border expansion) for the Detour
+    // tile origin. bmin/bmax include the BorderSize*CellSize expansion used
+    // only for Recast rasterization — using them here would shift the Detour
+    // tile origin by borderMeters (~1.33m) and produce the visible M2/WMO
+    // placement offset. Mirrors C++ MapBuilder.cpp:
+    //   rcVcopy(params.bmin, bmin)   ← but only after stripping the border
+    // The actual strip is done above (coreBmin = bmin + borderMeters, etc.).
+    memcpy(navParams.bmin, coreBmin, sizeof(float) * 3);
+    memcpy(navParams.bmax, coreBmax, sizeof(float) * 3);
     navParams.cs              = pmesh->cs;
     navParams.ch              = pmesh->ch;
     navParams.walkableHeight  = params->WalkableHeight * params->CellHeight;
