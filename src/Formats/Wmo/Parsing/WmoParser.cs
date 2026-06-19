@@ -1,3 +1,4 @@
+using System.IO;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using MaNGOS.Extractor.Core.Binary;
@@ -42,6 +43,30 @@ public sealed class WmoParser
     private WmoParseResult ParseRootInternal(string path, ReadOnlyMemory<byte> data)
     {
         var warnings = new List<string>();
+        // Safety net: a corrupt WMO (truncated chunk, wrong mverSize, etc.)
+        // will throw EndOfStreamException from SpanReader.ReadPrimitive. The
+        // C++ Mangos wmo.cpp handles this by trusting SFileReadFile's bounded
+        // buffer; we must catch the equivalent here so one bad WMO doesn't
+        // abort the whole global scan. The WMO is marked as Failed and the
+        // caller (TryBuildWmoAsync) skips writing its .vmo to Buildings/.
+        try
+        {
+            return ParseRootInternalUnsafe(path, data, warnings);
+        }
+        catch (EndOfStreamException ex)
+        {
+            warnings.Add($"Truncated/corrupt WMO {path}: {ex.Message}");
+            return WmoParseResult.Failed(warnings);
+        }
+        catch (ArgumentOutOfRangeException ex)
+        {
+            warnings.Add($"Out-of-range read in WMO {path}: {ex.Message}");
+            return WmoParseResult.Failed(warnings);
+        }
+    }
+
+    private WmoParseResult ParseRootInternalUnsafe(string path, ReadOnlyMemory<byte> data, List<string> warnings)
+    {
         var reader = new SpanReader(data);
 
         // WMO files start with MVER (version header). Both WMO root and group
@@ -103,6 +128,17 @@ public sealed class WmoParser
         {
             uint chunkMagic = ReverseChunkMagic(reader.ReadUInt32());
             uint chunkSize2 = reader.ReadUInt32();
+
+            // Defensive: if the chunk claims to be larger than what's left in
+            // the file, it's a corrupt WMO. Bail out of the loop instead of
+            // trying to read gigabytes past the end. The MaNGOS C++ code does
+            // the same — it just doesn't crash because it uses SFileReadFile
+            // with a bounded buffer.
+            if (chunkSize2 > reader.Remaining)
+            {
+                warnings.Add($"Corrupt WMO chunk {MagicBytes.FourCCToString(chunkMagic)}: size={chunkSize2} > remaining={reader.Remaining} at offset ~{data.Length - reader.Remaining}");
+                break;
+            }
 
             switch (chunkMagic)
             {

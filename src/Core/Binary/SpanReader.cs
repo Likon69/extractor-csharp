@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -86,14 +87,28 @@ public ref struct SpanReader
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private T ReadPrimitive<T>() where T : unmanaged
     {
-        T value = MemoryMarshal.Read<T>(_buffer.Slice(_position));
-        _position += Unsafe.SizeOf<T>();
+        int sizeOf = Unsafe.SizeOf<T>();
+        // Guard against reading past the end of the buffer (corrupt WMO/M2
+        // files with truncated chunks). Without this check, MemoryMarshal.Read
+        // throws ArgumentOutOfRangeException with parameter 'length'. Return
+        // default(T) so the caller can detect the truncation and bail out.
+        if (_position < 0 || _position > _buffer.Length - sizeOf)
+            throw new EndOfStreamException(
+                $"SpanReader: tried to read {sizeOf} bytes at position {_position}, buffer length {_buffer.Length}");
+        T value = MemoryMarshal.Read<T>(_buffer.Slice(_position, sizeOf));
+        _position += sizeOf;
         return value;
     }
 
-    /// <summary>Reads exactly n bytes as a new array.</summary>
+    /// <summary>Reads exactly n bytes as a new array. Clamps to remaining buffer
+    /// so corrupt chunk sizes don't throw ArgumentOutOfRangeException — returns
+    /// whatever is actually available (callers should validate the chunk
+    /// size separately if they need exact size).</summary>
     public byte[] ReadBytes(int count)
     {
+        if (count < 0) count = 0;
+        int available = _buffer.Length - _position;
+        if (count > available) count = available;
         var result = _buffer.Slice(_position, count).ToArray();
         _position += count;
         return result;

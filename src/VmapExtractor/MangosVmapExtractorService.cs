@@ -39,6 +39,7 @@ public sealed class MangosVmapExtractorService
     private readonly M2Parser _m2Parser;
     private readonly ILogger _logger;
     private readonly string _outputDir;
+    private readonly int _globalThreadCount;
     private readonly HashSet<string> _writtenVmoFiles = new(StringComparer.OrdinalIgnoreCase);
     // Per-map doodad data keyed by uniform WMO name. Populated by
     // TryBuildWmoAsync (which already iterates every group) and consumed by
@@ -50,7 +51,8 @@ public sealed class MangosVmapExtractorService
     public MangosVmapExtractorService(
         IArchiveReader archive,
         ILoggerFactory loggerFactory,
-        string outputDir)
+        string outputDir,
+        int threadCount = 4)
     {
         _archive = archive;
         _logger = loggerFactory.CreateLogger<MangosVmapExtractorService>();
@@ -59,7 +61,8 @@ public sealed class MangosVmapExtractorService
         _wmoParser = new WmoParser(archive, loggerFactory.CreateLogger<WmoParser>());
         _m2Parser = new M2Parser(archive);
         _outputDir = outputDir;
-        _logger.LogInformation("[MangosVmap] Output directory: {OutputDir}", outputDir);
+        _globalThreadCount = threadCount;
+        _logger.LogInformation("[MangosVmap] Output directory: {OutputDir} (threads={Threads})", outputDir, threadCount);
     }
 
     public async Task<int> ExtractMapAsync(
@@ -165,15 +168,25 @@ public sealed class MangosVmapExtractorService
         // re-reads Buildings/dir_bin after the ADT pass and writes the .vmtile
         // files with the correct BIH-referenced indices.
 
+        var adtLastLog = DateTime.UtcNow;
+        int adtIdx = 0;
         foreach (var (tileX, tileY) in tiles)
         {
             ct.ThrowIfCancellationRequested();
-
+            adtIdx++;
             var perTile = new List<MangosModelSpawn>();
             string adtPath = $"World\\Maps\\{mapName}\\{mapName}_{tileX}_{tileY}.adt";
             var result = await _adtParser.ParseAsync(adtPath, mapId, tileX, tileY, ct);
             if (!result.Success || result.Tile == null)
+            {
+                if ((DateTime.UtcNow - adtLastLog).TotalSeconds >= 2)
+                {
+                    adtLastLog = DateTime.UtcNow;
+                    _logger.LogInformation("[MangosVmap] ADT progress: {Done}/{Total} (last={Tx}_{Ty}, built vmo={Vmo} vmd={Vmd})",
+                        adtIdx, tiles.Count, tileX, tileY, builtVmo, builtVmd);
+                }
                 continue;
+            }
 
             // WMO placements (MODF)
             for (int i = 0; i < result.Tile.WmoPlacements.Length; i++)
@@ -282,7 +295,37 @@ public sealed class MangosVmapExtractorService
             // referencedVal (= modelNodeIdx[spawn.ID]). Writing them here with a
             // sequential index would diverge from the C++ reference output.
             writtenTiles++;
+            if ((DateTime.UtcNow - adtLastLog).TotalSeconds >= 2)
+            {
+                adtLastLog = DateTime.UtcNow;
+                _logger.LogInformation("[MangosVmap] ADT progress: {Done}/{Total} (last={Tx}_{Ty}, built vmo={Vmo} vmd={Vmd}, total placements wmo={Tw} m2={Tm})",
+                    adtIdx, tiles.Count, tileX, tileY, builtVmo, builtVmd, totalWmo, totalM2);
+            }
         }
+        _logger.LogInformation("[MangosVmap] ADT pass complete: {Done}/{Total} tiles, built vmo={Vmo} vmd={Vmd}",
+            adtIdx, tiles.Count, builtVmo, builtVmd);
+
+        // ===========================================================================
+        // FAITHFUL PORT of MaNGOS wmo.cpp::ExtractWmo — global WMO/M2 scan.
+        //
+        // The C++ vmap-extractor does NOT only extract WMOs/M2s referenced by
+        // ADT/WDT placements. It iterates EVERY MPQ archive and extracts EVERY
+        // .wmo / .m2 file found, regardless of whether any ADT uses it. This
+        // ensures:
+        //   1. Gameobject models (chairs, doors, lamps, transports...) referenced
+        //      only by GameObjectDisplayInfo.dbc but not by any ADT are still
+        //      built into Buildings/ + vmaps/.
+        //   2. WMOs that are global map objects (continents / dungeon roots) but
+        //      not placed in any tile are still extracted so the mmap-extractor
+        //      can load them.
+        //   3. The doodad M2s of those WMOs are reachable through MangosDoodadExtractor.
+        //
+        // Mirrors ExtractWmo() lines 789-819 (reverse MPQ priority order so the
+        // highest-priority WMO overwrites lower). Per-archive inline processing
+        // avoids the StormLib SFileFindFirstFile deadlock that a pre-collection
+        // loop would trigger.
+        // ===========================================================================
+        await ExtractAllWmoM2GloballyAsync(Path.Combine(_outputDir, "Buildings"), ct);
 
         // Phase-2 of the Mangos extractor (TileAssembler::convertWorld2):
         // re-read Buildings/dir_bin, build the BIH tree, and write the
@@ -314,6 +357,90 @@ public sealed class MangosVmapExtractorService
     /// </summary>
     public bool AssembleMap(uint mapId, string mapName)
         => AssembleMap(mapId, mapName, out _);
+
+    // ---------------------------------------------------------------------------
+    // Global WMO scan — faithful port of MaNGOS wmo.cpp::ExtractWmo (789-819).
+    //
+    // The C++ vmap-extractor iterates EVERY MPQ archive and extracts EVERY
+    // .wmo file found, regardless of whether any ADT uses it. This is the
+    // ONE global MPQ scan the C++ does. M2s are NOT scanned globally by the
+    // C++ — they only come from the per-ADT MDDF pass and the DBC-driven
+    // ExtractGameobjectModels() pass. (Earlier the C# also did a global
+    // .m2 scan, but that produced 2106 extra M2s vs the C++ reference:
+    // vehicles, bosses, BG portals, mounts, spell-visuals — all the
+    // models that live in MPQ but are never referenced by any ADT or DBC.)
+    //
+    // Done in REVERSE MPQ priority order so the highest-priority WMO (patch
+    // MPQs) is the one on disk — lower-priority copies from world.MPQ get
+    // overwritten by the patch-version that wins the client priority list.
+    //
+    // Two key behaviors matching the C++ ExtractWmo loop:
+    //   1. **Per-archive iteration with inline processing**: SFileFindFirstFile
+    //      returns a handle that must be drained in the same call. Pre-collecting
+    //      all 50k+ files into a List<string> before processing keeps the find
+    //      handle alive too long and triggers StormLib deadlocks. We iterate
+    //      one archive at a time and process each file inline as it's yielded.
+    //   2. **Disk-existence skip**: if Buildings/{uniformName} already exists,
+    //      the file is considered already extracted and is skipped. This makes
+    //      re-runs instant (matches C++ ExtractSingleWmo's FileExists check at
+    //      wmo.cpp:675).
+    // ---------------------------------------------------------------------------
+    private async Task ExtractAllWmoM2GloballyAsync(string buildingsDir, CancellationToken ct)
+    {
+        // -- 1. Scan all MPQ archives for *.wmo ----------------------------------
+        _logger.LogInformation("[MangosVmap] Global WMO scan: iterating MPQs in reverse priority order");
+        int globalWmoBuilt = 0, globalWmoFailed = 0, globalWmoSkipped = 0, globalWmoExist = 0;
+        var wmoLastLog = DateTime.UtcNow;
+        int wmoIdx = 0;
+        // Tracks which uniform names we've already PROCESSED (built or skipped).
+        // The reverse-priority iteration means we may see the same uniform name
+        // multiple times (once per archive it's in); we keep the LAST write, which
+        // is from the highest-priority archive.
+        var wmoProcessed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        await Task.Run(() =>
+        {
+            _archive.ForEachFileReversePriority("*.wmo", wmoPath =>
+            {
+                ct.ThrowIfCancellationRequested();
+                wmoIdx++;
+                string uni = MangosVmapBuildingWriter.GetUniformName(wmoPath);
+                // Dedup: if we already processed this uniform, skip. The highest-
+                // priority archive was processed LAST in reverse order, so its
+                // bytes are the ones on disk.
+                if (!wmoProcessed.Add(uni)) { globalWmoSkipped++; return; }
+                string buildingFile = Path.Combine(buildingsDir, uni);
+                if (File.Exists(buildingFile)) { globalWmoExist++; return; }
+                if (_writtenVmoFiles.Contains(uni)) { globalWmoSkipped++; return; }
+                try
+                {
+                    bool ok = TryBuildWmoAsync(wmoPath, ct).GetAwaiter().GetResult();
+                    if (ok) { globalWmoBuilt++; _writtenVmoFiles.Add(uni); }
+                    else globalWmoFailed++;
+                }
+                catch (Exception ex) { _logger.LogDebug(ex, "[MangosVmap] Global WMO skip on {Path}", wmoPath); globalWmoFailed++; }
+                if ((DateTime.UtcNow - wmoLastLog).TotalSeconds >= 1)
+                {
+                    wmoLastLog = DateTime.UtcNow;
+                    _logger.LogInformation("[MangosVmap] Global WMO progress: seen={Seen} unique={Unique} (built={Built} exist={Exist} skipped={Skipped} failed={Failed})",
+                        wmoIdx, wmoProcessed.Count, globalWmoBuilt, globalWmoExist, globalWmoSkipped, globalWmoFailed);
+                }
+            });
+        }, ct);
+        _logger.LogInformation("[MangosVmap] Global WMO pass done: seen={Seen} unique={Unique} built={Built} exist={Exist} skipped={Skipped} failed={Failed}",
+            wmoIdx, wmoProcessed.Count, globalWmoBuilt, globalWmoExist, globalWmoSkipped, globalWmoFailed);
+
+        // -- 2. Scan all MPQ archives for *.m2 -----------------------------------
+        // [DISABLED 2026-06-19] The C++ Mangos does NOT do a global "*.m2" MPQ scan.
+        // M2s come ONLY from the per-ADT MDDF pass and the DBC-driven
+        // ExtractGameobjectModels() pass. Doing a global scan here extracts
+        // 2106 extra M2s (vehicles, bosses, BG portals, mounts, spell-visuals)
+        // that the C++ reference doesn't have, and the scan over 24k+ files
+        // takes ~10 minutes with 14k+ parse failures. The C# output should
+        // match the C++ reference (5593 M2s), not exceed it.
+        _logger.LogInformation("[MangosVmap] Global M2 scan: DISABLED (C++ Mangos doesn't do this; M2s come from MDDF + GameObjectDisplayInfo.dbc only)");
+        await Task.Yield();
+    }
 
     private bool AssembleMap(uint mapId, string mapName, out string vmtreePath)
     {
@@ -528,79 +655,39 @@ public sealed class MangosVmapExtractorService
             }
 
             // Faithful port of MaNGOS ExtractSingleWmo:
-            //   - Buildings/{uniform_name} receives the RAW .vmo (VMAPt07 magic,
-            //     root header + per-group GRP/INDX/VERT chunks) — what the C++
-            //     TileAssembler picks up in phase 2 to rebuild the BIH.
-            //   - vmaps/{path}.vmo receives the FINAL format (VMAP_4.0 magic,
-            //     WMOD/GMOD/VERT/TRIM/MBIH/GBIH chunks) — what the mmap-extractor
-            //     reads at runtime.
+            //   - Buildings/{uniform_name} receives the FINAL .vmo (VMAP_4.0 magic,
+            //     WMOD/GMOD/VERT/TRIM/MBIH/GBIH chunks) — what the C++ TileAssembler
+            //     reads in phase 2 to rebuild the per-tile spawn list, AND what the
+            //     mmap-extractor reads at runtime (the C++ then copies this file to
+            //     vmaps/ as part of TileAssembler::convertWorld2).
+            //   - vmaps/{path}.vmo is a copy of the same bytes, with the extension
+            //     rewritten from .wmo to .vmo so the mmap-extractor's lookup matches.
+            //
+            // The previous "raw" (VMAPt07) intermediate format was a Honorbuddy
+            // artifact and is NOT how the C++ Mangos writes. The C++ writes the
+            // same VMAP_4.0 file to Buildings/ and then copies it to vmaps/.
             string uniformName = MangosVmapBuildingWriter.GetUniformName(wmoName);
 
-            // Build the raw .vmo for Buildings/ from the ORIGINAL unfiltered data
-            // (MaNGOS wmo.cpp:152-165 + 284-..., preciseVectorData=true default).
-            // This writes ALL triangles (not just collision) and the real MOBA
-            // BSP tree, matching the C++ byte-for-byte.
-            var rawGroups = new List<MangosRawVmoWriter.WmoGroupRawData>(rawGroupData.Count);
-            foreach (var grp in rawGroupData)
-            {
-                // MOBA: each batch is 12 uint16s. The C++ writes MobaEx as int32,
-                // one per batch, using MOBA[i] where i starts at 8 and steps by 12.
-                // Since MOBA is uint16*, MOBA[i] reads uint16 at index i. The loop
-                // `for (int i = 8; i < moba_size; i += 12)` with moba_size in BYTES
-                // is a known C++ bug (compares uint16 index to byte count), but the
-                // actual indices read are 8, 20, 32, ... in uint16 units. So in C#
-                // terms: RawMoba[8 + k*12]. Clamp to array bounds to avoid
-                // IndexOutOfRangeException for the out-of-bounds reads the C++
-                // silently does (undefined behavior in C, garbage in the output).
-                int mobaBatch = grp.RawMoba.Length / 12;
-                int[] moba = new int[mobaBatch];
-                for (int k = 0; k < mobaBatch; k++)
-                {
-                    int idx = 8 + k * 12;
-                    moba[k] = idx < grp.RawMoba.Length ? grp.RawMoba[idx] : 0;
-                }
-
-                // MOVI: 3 uint16 per triangle. C++ writes the full MOVI array (all
-                // triangles). C# WmoTriangle has I0/I1/I2 as ushort.
-                var gIdx = new ushort[grp.Triangles.Length * 3];
-                for (int i = 0; i < grp.Triangles.Length; i++)
-                {
-                    gIdx[i * 3 + 0] = grp.Triangles[i].I0;
-                    gIdx[i * 3 + 1] = grp.Triangles[i].I1;
-                    gIdx[i * 3 + 2] = grp.Triangles[i].I2;
-                }
-
-                // MOVT: 3 floats per vertex.
-                var gVerts = new Vector3[grp.Vertices.Length];
-                for (int i = 0; i < grp.Vertices.Length; i++)
-                {
-                    gVerts[i] = new Vector3(grp.Vertices[i].X, grp.Vertices[i].Y, grp.Vertices[i].Z);
-                }
-
-                rawGroups.Add(new MangosRawVmoWriter.WmoGroupRawData
-                {
-                    MogpFlags = grp.Header.Flags,
-                    GroupWMOID = grp.Header.GroupWmoId,
-                    BoundMin = new Vector3(grp.Header.BoundingBoxMin.X, grp.Header.BoundingBoxMin.Y, grp.Header.BoundingBoxMin.Z),
-                    BoundMax = new Vector3(grp.Header.BoundingBoxMax.X, grp.Header.BoundingBoxMax.Y, grp.Header.BoundingBoxMax.Z),
-                    LiquFlags = 0,
-                    MobaNodes = moba,
-                    Indices = gIdx,
-                    Vertices = gVerts,
-                });
-            }
-            byte[] rawVmoBytes = MangosRawVmoWriter.WriteWmo(root.Root.Header.WmoId, rawGroups);
-
-            // Final format for vmaps/
+            // Build the final-format .vmo bytes (VMAP_4.0 + WMOD + GMOD + VERT + TRIM
+            // + MBIH + GBIH) — exactly what MaNGOS Model::WriteFile / Wmo::WriteFile
+            // produce. This is the SINGLE output format; there is no intermediate
+            // "raw" representation in the C++ pipeline.
             byte[] vmoBytes = MangosVmoReader.ToBytes(root.Root.Header.WmoId, groups);
 
-            string vmoPath = Path.Combine(_outputDir, "vmaps", wmoName.Replace('\\', '/') + ".vmo");
+            // C++ Mangos uses .vmo for the compiled collision file in vmaps/ — replace
+            // the extension so the mmap-extractor's spawn.Name + ".vmo" lookup matches.
+            string vmoFlatName = wmoUniformName.Replace(".wmo", ".vmo", StringComparison.OrdinalIgnoreCase);
+            string vmoPath = Path.Combine(_outputDir, "vmaps", vmoFlatName);
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(vmoPath))!);
             File.WriteAllBytes(vmoPath, vmoBytes);
 
+            // Buildings/ also gets the same VMAP_4.0 bytes (the C++ writes here first
+            // then copies to vmaps/ during TileAssembler). The dir_bin references
+            // this file by spawn.Name = uniformName (with .wmo extension preserved);
+            // MangosVmoReader doesn't care about the extension — it reads by magic.
             string buildingPath = Path.Combine(_outputDir, "Buildings", wmoUniformName);
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(buildingPath))!);
-            File.WriteAllBytes(buildingPath, rawVmoBytes);
+            File.WriteAllBytes(buildingPath, vmoBytes);
             return true;
         }
         catch (Exception ex)
@@ -767,40 +854,37 @@ public sealed class MangosVmapExtractorService
             };
 
             // Faithful port of MaNGOS ExtractSingleModel:
-            //   - Buildings/{uniform_name} receives the RAW .vmd (VMAPt07 magic,
-            //     simple vertex+index chunks) — what the C++ TileAssembler picks
-            //     up in phase 2 to rebuild the BIH.
-            //   - vmaps/{path}.vmd receives the FINAL format (VMAP_4.0 magic,
-            //     WMOD/GMOD/VERT/TRIM/MBIH chunks) — what the mmap-extractor
-            //     reads at runtime.
+            //   - Buildings/{uniform_name} receives the FINAL .vmd (VMAP_4.0 magic,
+            //     WMOD/GMOD/VERT/TRIM/MBIH/GBIH chunks) — what the C++ TileAssembler
+            //     reads in phase 2 to rebuild the per-tile spawn list, AND what the
+            //     mmap-extractor reads at runtime.
+            //   - vmaps/{path}.vmd is a copy of the same bytes with the extension
+            //     rewritten from .m2 to .vmd.
+            //
+            // The previous "raw" (VMAPt07) intermediate format was a Honorbuddy
+            // artifact and is NOT how the C++ Mangos writes. There is no raw
+            // intermediate in the C++ pipeline.
             string uniformName = MangosVmapBuildingWriter.GetUniformName(m2Name);
 
-            // Raw format for Buildings/ (MaNGOS model.cpp:121-184)
-            // nIndices is uint16, M2 bounding mesh rarely exceeds 65k.
-            if (indices.Length > 0xFFFF)
-            {
-                _logger.LogWarning("[MangosVmap] M2 {M2} has {N} indices (>65535), truncating for raw .vmd", m2Name, indices.Length);
-            }
-            var rawIndices = new ushort[Math.Min(indices.Length, 0xFFFF)];
-            for (int i = 0; i < rawIndices.Length; i++) rawIndices[i] = (ushort)indices[i];
-            var rawM2 = new MangosRawVmoWriter.M2RawData
-            {
-                NVertices = (uint)v.Length,
-                Indices = rawIndices,
-                Vertices = v,
-            };
-            byte[] rawVmdBytes = MangosRawVmoWriter.WriteM2(rawM2);
-
-            // Final format for vmaps/
+            // Build the final-format .vmd bytes (VMAP_4.0 + WMOD + GMOD + VERT + TRIM
+            // + MBIH + GBIH) — exactly what MaNGOS M2::WriteFile / Model::WriteFile
+            // produce. The M2's bounding-mesh indices (ushort per vertex) are written
+            // into the GMOD group's TRIM chunk; no separate "raw" index truncation.
             byte[] vmdBytes = MangosVmoReader.ToBytes(0, new[] { grp });
 
-            string vmdPath = Path.Combine(_outputDir, "vmaps", m2Name.Replace('\\', '/') + ".vmd");
+            // C++ Mangos uses .vmd for the compiled collision file in vmaps/ — replace
+            // the extension so the mmap-extractor's spawn.Name + ".vmd" lookup matches.
+            string vmdFlatName = uniformName.Replace(".m2", ".vmd", StringComparison.OrdinalIgnoreCase);
+            string vmdPath = Path.Combine(_outputDir, "vmaps", vmdFlatName);
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(vmdPath))!);
             File.WriteAllBytes(vmdPath, vmdBytes);
 
+            // Buildings/ gets the same VMAP_4.0 bytes (the C++ writes here first
+            // then copies to vmaps/ during TileAssembler). MangosVmoReader doesn't
+            // care about the extension — it reads by magic.
             string buildingPath = Path.Combine(_outputDir, "Buildings", uniformName);
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(buildingPath))!);
-            File.WriteAllBytes(buildingPath, rawVmdBytes);
+            File.WriteAllBytes(buildingPath, vmdBytes);
             return true;
         }
         catch (Exception ex)

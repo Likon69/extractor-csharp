@@ -78,6 +78,44 @@ public static class MapFileReader
         public float MinHeight { get; set; }
         public float MaxHeight { get; set; }
         public bool HasHeight { get; set; }
+        public LiquidData? Liquid { get; set; }
+    }
+
+    /// <summary>
+    /// Liquid (water/lava/slime) data from the MLIQ section of a .map file.
+    /// Mirrors MaNGOS C++ TerrainBuilder::loadMap() — the mmap-extractor uses
+    /// <see cref="Flags"/> to decide NAV_WATER vs NAV_LAVA and <see cref="Heights"/>
+    /// (or <see cref="LiquidLevel"/> when <see cref="HasHeightValues"/> is false)
+    /// to position the liquid surface.
+    ///
+    /// WotLK MAP_LIQUID_TYPE_* flag values (stored in <see cref="Flags"/>):
+    ///   0x00 = no water, 0x01 = Water, 0x02 = Ocean, 0x04 = Magma, 0x08 = Slime, 0x10 = DarkWater
+    /// </summary>
+    public sealed class LiquidData
+    {
+        public ushort LiquidType { get; set; }   // global type when header has NO_TYPE flag
+        public byte OffsetX { get; set; }
+        public byte OffsetY { get; set; }
+        public byte Width { get; set; }
+        public byte Height { get; set; }
+        public float LiquidLevel { get; set; }
+        public bool HasType { get; set; }        // !NO_TYPE
+        public bool HasHeightValues { get; set; } // !NO_HEIGHT
+        /// <summary>256 per-chunk flags (MAP_LIQUID_TYPE_* bitfield). Only valid when <see cref="HasType"/> is true; otherwise use <see cref="LiquidType"/> for all cells.</summary>
+        public byte[] Flags { get; set; } = new byte[TotalChunks];
+        /// <summary>Per-vertex heights, (Width+1)*(Height+1) floats. Only valid when <see cref="HasHeightValues"/> is true; otherwise use <see cref="LiquidLevel"/>.</summary>
+        public float[]? Heights { get; set; }
+
+        public bool HasAnyLiquid
+        {
+            get
+            {
+                if (!HasType) return LiquidType != 0;
+                for (int i = 0; i < Flags.Length; i++)
+                    if (Flags[i] != 0) return true;
+                return false;
+            }
+        }
     }
 
     public static TileData? Read(string filePath)
@@ -89,9 +127,14 @@ public static class MapFileReader
             using var br = new BinaryReader(fs);
             return Read(br);
         }
-        catch
+        catch (Exception ex)
         {
-            return null;
+            // Surface the real error so callers (mmap service) can log it
+            // instead of silently dropping the tile. The mmap service logs
+            // its own warning when Read returns null, but the inner
+            // exception is what tells us WHY (bad magic, truncated MLIQ,
+            // seek past EOF, etc.).
+            throw new InvalidDataException($"MapFileReader.Read failed for {filePath}: {ex.Message}", ex);
         }
     }
 
@@ -181,6 +224,57 @@ public static class MapFileReader
                         data.V8Heights[i] = br.ReadSingle();
                 }
             }
+        }
+
+        // ---- MLIQ section (liquid / water / lava) ----
+        // Mirrors MaNGOS C++ TerrainBuilder::loadMap() in Movemap-Generator/TerrainBuilder.cpp.
+        // The mmap-extractor needs the per-chunk flags (to pick NAV_WATER vs NAV_LAVA) and
+        // the per-vertex heights (or the global liquidLevel when NO_HEIGHT is set).
+        if (liquidMapOffset != 0 && liquidMapSize >= 16)
+        {
+            br.BaseStream.Seek(liquidMapOffset, SeekOrigin.Begin);
+            uint fourcc = br.ReadUInt32();
+            ushort liqFlags = br.ReadUInt16();
+            ushort liquidType = br.ReadUInt16();
+            byte offX = br.ReadByte();
+            byte offY = br.ReadByte();
+            byte w = br.ReadByte();
+            byte h = br.ReadByte();
+            float level = br.ReadSingle();
+
+            const ushort MLIQ_NO_TYPE = 0x0001;
+            const ushort MLIQ_NO_HEIGHT = 0x0002;
+
+            var liq = new LiquidData
+            {
+                LiquidType = liquidType,
+                OffsetX = offX,
+                OffsetY = offY,
+                Width = w,
+                Height = h,
+                LiquidLevel = level,
+                HasType = (liqFlags & MLIQ_NO_TYPE) == 0,
+                HasHeightValues = (liqFlags & MLIQ_NO_HEIGHT) == 0,
+            };
+
+            if (liq.HasType)
+            {
+                // C++ System.cpp writes 256×uint16 liquid_entry THEN 256×uint8 liquid_flags.
+                // The mmap only needs the flags (MAP_LIQUID_TYPE_* bitfield per chunk), so we
+                // skip the entry array (the LiquidType.dbc row ID is not consumed by the mmap).
+                for (int i = 0; i < TotalChunks; i++) br.ReadUInt16();
+                for (int i = 0; i < TotalChunks; i++) liq.Flags[i] = br.ReadByte();
+            }
+            if (liq.HasHeightValues && w > 0 && h > 0)
+            {
+                // C++ System.cpp writes w*h floats (NOT (w+1)*(h+1)) — the compact
+                // liquid_height rectangle, not the full 129×129 V9 vertex grid.
+                int count = w * h;
+                liq.Heights = new float[count];
+                for (int i = 0; i < count; i++) liq.Heights[i] = br.ReadSingle();
+            }
+
+            data.Liquid = liq;
         }
 
         // ---- Holes section (we don't currently use this in the mmap service,

@@ -164,6 +164,29 @@ public sealed class MpqArchiveCollection : IArchiveReader
         }
     }
 
+    /// <summary>
+    /// Iterate files matching <paramref name="pattern"/> in REVERSE archive
+    /// priority order (lowest priority first, highest priority last) — so
+    /// the caller can overwrite lower-priority files with higher-priority
+    /// ones. Mirrors the C++ MaNGOS vmapexport.cpp loop:
+    ///   for (ArchiveSet::reverse_iterator ar = gOpenArchives.rbegin(); ...)
+    /// The callback is invoked immediately for each file (no pre-collection),
+    /// which avoids keeping 50k+ SFileFind handles alive in memory.
+    /// </summary>
+    public void ForEachFileReversePriority(string pattern, Action<string> onFile)
+    {
+        for (int i = _archives.Count - 1; i >= 0; i--)
+        {
+            var archive = _archives[i];
+            // Force the enumerator: ListFiles uses SFileFindFirstFile which
+            // returns a handle that must be drained immediately.
+            foreach (var file in archive.ListFiles(pattern))
+            {
+                onFile(file);
+            }
+        }
+    }
+
     /// <inheritdoc />
     public Stream? OpenFileStream(string path)
     {

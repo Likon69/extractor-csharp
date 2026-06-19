@@ -24,6 +24,13 @@ public interface IArchiveReader : IDisposable
     IEnumerable<string> ListFiles(string pattern);
 
     /// <summary>
+    /// Iterate files matching <paramref name="pattern"/> in REVERSE priority
+    /// order (lowest first, highest last), invoking the callback for each
+    /// file as it's discovered. Avoids materialising 50k+ SFileFind handles.
+    /// </summary>
+    void ForEachFileReversePriority(string pattern, Action<string> onFile);
+
+    /// <summary>
     /// Opens a file stream for reading without loading the entire file.
     /// </summary>
     Stream? OpenFileStream(string path);

@@ -13,8 +13,6 @@ using MaNGOS.Extractor.Formats.Adt.Models;
 using MaNGOS.Extractor.Formats.Adt.Parsing;
 using MaNGOS.Extractor.Formats.Dbc;
 using MaNGOS.Extractor.Formats.M2;
-using MaNGOS.Extractor.Formats.Map.Reading;
-using MaNGOS.Extractor.Formats.Vmap.Mangos;
 using MaNGOS.Extractor.Formats.Wdt;
 using MaNGOS.Extractor.Formats.Wmo.Models;
 using MaNGOS.Extractor.Formats.Wmo.Parsing;
@@ -27,9 +25,7 @@ public sealed class MmapExtractorService
 {
     private readonly IArchiveReader _archive;
     private readonly WdtReader _wdtReader;
-    // NOTE: AdtParser is intentionally NOT used here. The mmap reads terrain from
-    // the extracted .map files only (MapFileReader), never the raw ADT. The WMO/M2
-    // parsers below are still needed for GameObject model meshes.
+    private readonly AdtParser _adtParser;
     private readonly WmoParser _wmoParser;
     private readonly M2Parser _m2Parser;
     private readonly ILogger _logger;
@@ -42,9 +38,9 @@ public sealed class MmapExtractorService
     private readonly ConcurrentDictionary<uint, GameObjectModelData?> _gameObjectModelCache = new();
     private readonly string? _offMeshPath;
     private readonly string? _roadMapsDir;
+    private readonly string? _vmapDir;  // directory containing vmaps/MapName/ (output of vmap-extractor)
+    private readonly string? _mapsDir;  // directory containing maps/{id:D3}{y:D2}{x:D2}.map (output of map-extractor)
     private readonly bool _usesLiquids;
-    private readonly string? _vmapDir;  // directory containing vmaps/MapName/
-    private readonly string? _mapsDir;  // directory containing maps/{id:D3}{y:D2}{x:D2}.map
 
     public MmapExtractorService(
         IArchiveReader archive,
@@ -62,16 +58,17 @@ public sealed class MmapExtractorService
         _archive = archive;
         _logger = loggerFactory.CreateLogger<MmapExtractorService>();
         _wdtReader = new WdtReader(archive);
+        _adtParser = new AdtParser(archive, loggerFactory.CreateLogger<AdtParser>());
         _wmoParser = new WmoParser(archive, loggerFactory.CreateLogger<WmoParser>());
         _m2Parser = new M2Parser(archive);
         _outputDir = outputDir;
         _recastConfig = recastConfig;
         _maxDegreeOfParallelism = Math.Max(1, maxDegreeOfParallelism);
         _offMeshPath = offMeshPath;
-        _usesLiquids = usesLiquids;
         _roadMapsDir = roadMapsDir;
         _vmapDir = vmapDir;
         _mapsDir = mapsDir;
+        _usesLiquids = usesLiquids;
 
         // --- Log Recast config ---
         _logger.LogInformation("[Mmap] Recast config: cellSize={CellSize:F6} cellHeight={CellHeight:F3} " +
@@ -102,9 +99,6 @@ public sealed class MmapExtractorService
         _gameObjectModels = LoadGameObjectModels();
         if (!string.IsNullOrEmpty(_roadMapsDir))
             _logger.LogInformation("[Mmap] Road mask directory: {Path}", _roadMapsDir);
-        if (string.IsNullOrEmpty(_mapsDir))
-            throw new ArgumentException("[Mmap] mapsDir is required — the mmap reads only the extracted .map files, never the raw ADT. Run the Map phase first.", nameof(mapsDir));
-        _logger.LogInformation("[Mmap] Map file directory (extracted .map): {Path}", _mapsDir);
         if (!Directory.Exists(outputDir))
             Directory.CreateDirectory(outputDir);
     }
@@ -246,36 +240,24 @@ public sealed class MmapExtractorService
 
     private void WriteMmapHeader(uint mapId, uint tileCount, int maxAdtX, int maxAdtY)
     {
-        // Mirrors MaNGOS C++ MapBuilder::buildNavMesh + getTileBounds (verts=NULL).
-        // C++ computes bmin from the most-positive-index tile:
-        //   bmax[0] = (32 - tileXMax) * GRID_SIZE
-        //   bmin[0] = bmax[0] - GRID_SIZE   = (31 - tileXMax) * GRID_SIZE
-        //   bmin[1] = FLT_MIN
-        //   bmax[1] = FLT_MAX
-        //   bmin[2] = bmax[2] - GRID_SIZE   = (31 - tileYMax) * GRID_SIZE
-        // then rcVcopy(navMeshParams->orig, bmin) copies bmin to orig.
+        // Origin = bmin of the tile at (maxAdtX, maxAdtY) — the most-positive-index corner.
+        // Matches C++ MapBuilder: rcVcopy(navMeshParams->orig, bmin) for the max-extent tile.
         float orig0 = (31 - maxAdtX) * WowConstants.TileSize;
-        float orig1 = 1.175494E-38f;  // FLT_MIN, matches C++ getTileBounds bmin[1] = FLT_MIN
         float orig2 = (31 - maxAdtY) * WowConstants.TileSize;
 
         string mmapPath = Path.Combine(_outputDir, $"{mapId:D3}.mmap");
-        // C# 4x4 sub-tile format: tileSize = SubTileSize, maxTiles = ADT count * 16
-        // (one Detour tile per sub-tile). Matches the multi-tile .mmtile layout
-        // (16 sub-tiles per ADT) consumed by the C# bot runtime.
-        float tileSize = WowConstants.SubTileSize;
-        int maxTiles = (int)(tileCount * WowConstants.SubTilesPerAdtSide * WowConstants.SubTilesPerAdtSide);
-
-        _logger.LogInformation("[Mmap] Writing header: {Path} (adts={TileCount}, maxTiles={MaxTiles}, tileSize={TileSize}, orig=({Orig0},{Orig2}))",
-            mmapPath, tileCount, maxTiles, tileSize, orig0, orig2);
+        uint detourTileCount = tileCount * WowConstants.SubTilesPerAdtSide * WowConstants.SubTilesPerAdtSide;
+        _logger.LogInformation("[Mmap] Writing header: {Path} (adts={TileCount}, detourTiles={DetourTileCount}, tileSize={TileSize}, orig=({Orig0},{Orig2}))",
+            mmapPath, tileCount, detourTileCount, WowConstants.SubTileSize, orig0, orig2);
         using var stream = new FileStream(mmapPath, FileMode.Create, FileAccess.Write);
         using var writer = new BinaryWriter(stream);
 
         writer.Write(orig0);                      // orig[0] = (31 - maxAdtX) * TileSize
-        writer.Write(orig1);                      // orig[1] = FLT_MIN
+        writer.Write(0f);                         // orig[1]
         writer.Write(orig2);                      // orig[2] = (31 - maxAdtY) * TileSize
-        writer.Write(tileSize);                   // tileWidth  = GRID_SIZE (533.333)
-        writer.Write(tileSize);                   // tileHeight = GRID_SIZE (533.333)
-        writer.Write(maxTiles);                   // maxTiles   = number of ADT tiles
+        writer.Write(WowConstants.SubTileSize);   // tileWidth  = 133.333333f
+        writer.Write(WowConstants.SubTileSize);   // tileHeight = 133.333333f
+        writer.Write((int)detourTileCount);       // maxTiles   = ADT count * 16
         writer.Write(1 << 20);                    // maxPolys   = 1 << DT_POLY_BITS
     }
 
@@ -326,22 +308,8 @@ public sealed class MmapExtractorService
 
         try
         {
-            // ADT bmin in world space — matches C++ getTileBounds(tileX) byte-for-byte
-            // (MapBuilder.cpp:996-1000):
-            //   bmax[0] = (32 - tileX) * GRID_SIZE
-            //   bmin[0] = bmax[0] - GRID_SIZE
-            // For tileX=32, bmaxX = 0, bminX = -GRID_SIZE = -533.33. For tileY=48,
-            // bmaxZ = -16*GRID_SIZE, bminZ = -17*GRID_SIZE = -9066.66.
-            //
-            // The previous code used (32 - tileX) * TileSize which gave 0 for
-            // tileX=32 — that was actually bmaxX, not bminX. The terrain is emitted
-            // at X = [-TileSize, 0] for tileX=32, so the bbox was one whole TileSize
-            // to the east of the actual geometry. Result: the Recast heightfield
-            // only saw the border strip (4× too small), the visible sub-tile was
-            // rotated 90° (border rasterized diagonally), and the position was
-            // off by one TileSize.
-            float bminX = (32 - tileX - 1) * WowConstants.TileSize;
-            float bminZ = (32 - tileY - 1) * WowConstants.TileSize;
+            float bminX = (31 - tileX) * WowConstants.TileSize;
+            float bminZ = (31 - tileY) * WowConstants.TileSize;
 
             var navData = BuildNavMeshSubTilesSync(mapId, geometry, tileX, tileY, maxAdtX, maxAdtY, bminX, bminZ, ct);
             if (navData.All(blob => blob == null || blob.Length == 0))
@@ -361,30 +329,9 @@ public sealed class MmapExtractorService
 
     private async Task<TileGeometry> LoadTileGeometryAsync(uint mapId, string mapName, int centerX, int centerY, CancellationToken ct)
     {
-        // Mangos-faithful terrain loading: read the .map files produced by the
-        // map-extractor (mangostwo-server/.../map-extractor/System.cpp). The
-        // original C++ MapBuilder::buildTile calls m_terrainBuilder->loadMap
-        // which opens the .map file directly — it NEVER re-parses the raw ADT.
-        //
-        // The whole point of the other extractors (map/vmap/road) is to feed the
-        // mmap from their output. There is therefore NO raw-ADT fallback: if the
-        // .map directory is missing or the center tile's .map is absent, this is
-        // a configuration error and we throw instead of silently degrading.
-        // (The previous raw fallback was a non-Mangos path that produced meshes
-        // inconsistent with the rest of the pipeline.)
-        if (string.IsNullOrEmpty(_mapsDir) || !Directory.Exists(_mapsDir))
-        {
-            throw new InvalidOperationException(
-                "[Mmap] mapsDir is required (run the Map phase first to produce the .map files). " +
-                "The mmap-extractor reads only the extracted .map files, never the raw ADT.");
-        }
-
-        var tiles = new List<(int X, int Y, MapFileReader.TileData Tile)>();
+        var tiles = new List<(int X, int Y, AdtFile[] Tile)>();
         int loadedCount = 0, skippedCount = 0;
 
-        // The C++ TerrainBuilder::loadMap loads the center ADT plus its 8 neighbors
-        // (3x3 window) so the navmesh can be linked across tile boundaries. We mirror
-        // that exactly, reading the .map file for each present neighbor.
         for (int dy = -1; dy <= 1; dy++)
         {
             for (int dx = -1; dx <= 1; dx++)
@@ -397,32 +344,23 @@ public sealed class MmapExtractorService
                     continue;
                 }
 
-                string mapPath = Path.Combine(_mapsDir!, $"{mapId:D3}{adjY:D2}{adjX:D2}.map");
-                if (!File.Exists(mapPath))
+                string adtPath = $"World\\Maps\\{mapName}\\{mapName}_{adjX}_{adjY}.adt";
+
+                var result = await _adtParser.ParseAsync(adtPath, mapId, adjX, adjY, ct);
+                if (!result.Success)
                 {
-                    // Neighbor tiles may legitimately not exist (map edges). Only the
-                    // CENTER tile is mandatory — a missing center means the ADT itself
-                    // doesn't exist, which is a real error handled by ExtractMapAsync
-                    // via the WDT existence check before we ever get here.
                     skippedCount++;
                     continue;
                 }
-                var tileData = MapFileReader.Read(mapPath);
-                if (tileData == null)
-                {
-                    _logger.LogWarning("[Mmap] Failed to parse .map ({TileX},{TileY}): {Path}", adjX, adjY, mapPath);
-                    skippedCount++;
-                    continue;
-                }
-                tiles.Add((adjX, adjY, tileData));
+                var adt = result.Tile;
+                if (adt == null) { skippedCount++; continue; }
+                tiles.Add((adjX, adjY, new[] { adt }));
                 loadedCount++;
             }
         }
 
-        _logger.LogInformation("[Mmap] LoadTileGeometry adt=({CX},{CY}): {Loaded} .map tiles loaded, {Skipped} skipped",
+        _logger.LogInformation("[Mmap] LoadTileGeometry adt=({CX},{CY}): {Loaded} ADTs loaded, {Skipped} skipped",
             centerX, centerY, loadedCount, skippedCount);
-
-        await Task.CompletedTask;  // keep async signature for callers; .map IO is synchronous
 
         if (tiles.Count == 0)
             return default;
@@ -430,10 +368,11 @@ public sealed class MmapExtractorService
         var geo = ExtrudeTileGeometry(mapId, centerX, centerY, tiles, LoadRoadMask(mapId, centerX, centerY));
 
         // Add WMO and M2 building/object geometry to the navmesh.
-        // Mangos-faithful path: the vmap-extractor has already produced
-        // .vmtile (placements) + .vmo/.vmd (compiled collision meshes). The
-        // mmap-extractor reads THOSE files only — never the raw ADT/WMO/M2.
-        // This matches the C++ TerrainBuilder::loadVMap exactly.
+        // Same intent as the original 9d63265 raw-ADT path (AppendWmoGeometryAsync + AppendM2Geometry),
+        // but reads from the EXTRACTED .vmtile + .vmo/.vmd files produced by the vmap-extractor
+        // (Mangos-faithful pipeline: C++ TerrainBuilder::loadVMap → C# MangosVmapGeometryLoader).
+        // The .vmtile already contains WMO root + WMO doodads + M2 placements, so this
+        // single load covers all three sources.
         if (!string.IsNullOrEmpty(_vmapDir))
         {
             var modelVerts = new List<float>();
@@ -476,20 +415,15 @@ public sealed class MmapExtractorService
         // Add GameObject spawns using the real model collision mesh, same intent as old MaNGOS loadGameObjects().
         if (_goSpawns.Length > 0)
         {
-            // World-space bbox of the ADT plus one-tile margin on each side
-            // (matches C++ TerrainBuilder::loadGameObjects which iterates the
-            // 3x3 neighborhood of the current ADT). For tileX=t, worldX is
-            // [(32 - t) * GRID_SIZE, (33 - t) * GRID_SIZE]; we expand by one
-            // GRID_SIZE on each side to catch spawns just outside the cell.
-            float worldXMin = (32f - centerX)     * WowConstants.TileSize;
-            float worldXMax = (32f - centerX + 1f) * WowConstants.TileSize;
-            float worldYMin = (32f - centerY)     * WowConstants.TileSize;
-            float worldYMax = (32f - centerY + 1f) * WowConstants.TileSize;
+            float wowXMax = (32f - centerY) * WowConstants.TileSize;
+            float wowXMin = (32f - centerY - 1f) * WowConstants.TileSize;
+            float wowYMax = (32f - centerX) * WowConstants.TileSize;
+            float wowYMin = (32f - centerX - 1f) * WowConstants.TileSize;
 
-            worldXMin -= WowConstants.TileSize;
-            worldXMax += WowConstants.TileSize;
-            worldYMin -= WowConstants.TileSize;
-            worldYMax += WowConstants.TileSize;
+            wowXMin -= WowConstants.TileSize;
+            wowXMax += WowConstants.TileSize;
+            wowYMin -= WowConstants.TileSize;
+            wowYMax += WowConstants.TileSize;
 
             var goVerts = new List<float>();
             var goIndices = new List<int>();
@@ -505,8 +439,8 @@ public sealed class MmapExtractorService
             {
                 if (go.MapId != mapId)
                     continue;
-                if (go.PosX < worldXMin || go.PosX > worldXMax
-                    || go.PosY < worldYMin || go.PosY > worldYMax)
+                if (go.PosX < wowXMin || go.PosX > wowXMax
+                    || go.PosY < wowYMin || go.PosY > wowYMax)
                     continue;
 
                 goCandidateCount++;
@@ -604,60 +538,40 @@ public sealed class MmapExtractorService
         return roadChunks > 0 ? mask : null;
     }
 
-    // Mangos-faithful terrain extrusion from the extracted .map file
-    // (vmap-extractor output). The .map file stores a flat 129×129 V9 grid
-    // and a 128×128 V8 grid for the entire ADT, plus 256 area flags (one
-    // per MCNK chunk). We slice the appropriate 9×9 / 8×8 window for each
-    // chunk and emit the same 4-triangle-per-cell fan that the C++
-    // TerrainBuilder::loadMap produces.
-    private static TileGeometry ExtrudeTileGeometry(uint mapId, int centerX, int centerY, List<(int X, int Y, MapFileReader.TileData Tile)> tiles, byte[]? centerRoadMask)
+    private static TileGeometry ExtrudeTileGeometry(uint mapId, int centerX, int centerY, List<(int X, int Y, AdtFile[] Tile)> tiles, byte[]? centerRoadMask)
     {
         var vertices = new List<float>();
         var indices = new List<int>();
         var areas = new List<byte>();
 
-        const float v9Step = WowConstants.ChunkSize / (WowConstants.MCNKVerticesSide - 1);
-
-        foreach (var (adjX, adjY, tile) in tiles)
+        foreach (var (adjX, adjY, tileArr) in tiles)
         {
+            var adt = tileArr[0];
+            int vertexOffset = vertices.Count / 3;
+
             for (int chunkIdx = 0; chunkIdx < 256; chunkIdx++)
             {
                 int chunkX = chunkIdx % 16;
                 int chunkY = chunkIdx / 16;
 
-                // Tile bmin in world space — same convention as the C++ map-extractor
-                // (System.cpp). For tileX=32 (the map center) bmin=0; tileX=0
-                // (west of center) bmin=32*GRID_SIZE; tileX=63 (east) bmin=-GRID_SIZE.
-                // Chunks within the ADT are placed going EAST→WEST. The V9 array
-                // (read from the .map file) is laid out with low cx at the EAST
-                // side of the ADT (cx=0 → worldX=0 for tileX=32) and high cx at
-                // the WEST side (cx=128 → worldX=G). The C# writer maps chunkX
-                // directly to the V9 array index (vBaseX = chunkX * 8), so chunk
-                // C++ TerrainBuilder::loadMap convention: tileOriginX/Z is the
-                // NE corner of the ADT bbox. Each chunk occupies
-                // [tileOrigin - (chunkX+1)*ChunkSize, tileOrigin - chunkX*ChunkSize]
-                // along X. So chunkOriginX (the WEST edge of each chunk) is:
-                //   chunkOriginX = tileOriginX - (chunkX + 1) * ChunkSize
-                // chunk 0 (east side): chunkOriginX = tileOriginX - ChunkSize
-                // chunk 15 (west side): chunkOriginX = tileOriginX - TileSize
-                float tileOriginX = (32f - adjX) * WowConstants.TileSize;
-                float tileOriginZ = (32f - adjY) * WowConstants.TileSize;
+                float tileOriginX = (32 - adjX) * WowConstants.TileSize;
+                float tileOriginZ = (32 - adjY) * WowConstants.TileSize;
 
-                float chunkOriginX = tileOriginX - (chunkX + 1) * WowConstants.ChunkSize;
-                float chunkOriginZ = tileOriginZ - (chunkY + 1) * WowConstants.ChunkSize;
+                float chunkOriginX = tileOriginX - chunkX * WowConstants.ChunkSize;
+                float chunkOriginZ = tileOriginZ - chunkY * WowConstants.ChunkSize;
 
-                int vertexOffset = vertices.Count / 3;
-                int v9BaseZ = chunkY * 8;
-                int v9BaseX = chunkX * 8;
+                var chunkHeights = adt.GetChunkHeights(chunkIdx);
+
+                float v9Step = WowConstants.ChunkSize / (WowConstants.MCNKVerticesSide - 1);
 
                 for (int z = 0; z < 9; z++)
                 {
                     for (int x = 0; x < 9; x++)
                     {
-                        float h = tile.V9Heights[(v9BaseZ + z) * MapFileReader.V9Side + (v9BaseX + x)];
-                        vertices.Add(chunkOriginX + x * v9Step);
+                        float h = AdtMcvt.GetV9(chunkHeights, z, x);
+                        vertices.Add(chunkOriginX - x * v9Step);
                         vertices.Add(h);
-                        vertices.Add(chunkOriginZ + z * v9Step);
+                        vertices.Add(chunkOriginZ - z * v9Step);
                     }
                 }
 
@@ -666,26 +580,38 @@ public sealed class MmapExtractorService
                 {
                     for (int x = 0; x < 8; x++)
                     {
-                        float h = tile.V8Heights[(v9BaseZ + z) * MapFileReader.V8Side + (v9BaseX + x)];
-                        vertices.Add(chunkOriginX + (x + 0.5f) * v9Step);
+                        float h = AdtMcvt.GetV8(chunkHeights, z, x);
+                        vertices.Add(chunkOriginX - (x + 0.5f) * v9Step);
                         vertices.Add(h);
-                        vertices.Add(chunkOriginZ + (z + 0.5f) * v9Step);
+                        vertices.Add(chunkOriginZ - (z + 0.5f) * v9Step);
                     }
                 }
 
-                // Area flag: any non-empty (non 0xFFFF) area → NAV_GROUND (1).
-                // The .map file stores the AreaTable.dbc area id; the C++ side
-                // also uses 1 as the Recast area type for any valid walkable area.
-                byte areaType = tile.AreaFlags[chunkIdx] != 0 && tile.AreaFlags[chunkIdx] != 0xFFFF
-                    ? (byte)1
-                    : (byte)0;
+                byte areaType = adt.GetChunkAreaType(chunkIdx);
                 if (adjX == centerX && adjY == centerY && centerRoadMask != null && centerRoadMask[chunkIdx] != 0)
                     areaType = 4; // NAV_ROAD
-
+                // MCNK.holes: WoW terrain holes are a 4×4 bitmask per chunk
+                // (16 bits → uint16 / lower 16 of uint32). Each bit covers a
+                // 2×2 zone of the chunk's 8×8 sub-triangles. The C++ map
+                // extractor writes the bitmask into map_fileheader.holes[i][j]
+                // and the C++ mmap extractor reads it back to OMIT those
+                // sub-triangles from the heightfield (otherwise the navmesh
+                // sees solid terrain at cave entrances and never links to the
+                // WMO interior). Mirrors MapBuilder.cpp:280-290 "if (holes
+                // & mask) continue;". adt.GetChunkHoles() returns the raw
+                // MCNK.holes bitmask for this chunk.
+                uint chunkHoles = adt.GetChunkHoles(chunkIdx); // ushort promoted to uint for the bit test below
                 for (int z = 0; z < 8; z++)
                 {
                     for (int x = 0; x < 8; x++)
                     {
+                        // MCNK.holes layout: 4×4 grid, each bit = a 2×2
+                        // zone of sub-triangles at index (z/2, x/2). Bit
+                        // set → that zone is a hole, skip all 4 sub-tris.
+                        int holeBit = (z / 2) * 4 + (x / 2);
+                        if (chunkHoles != 0 && (chunkHoles & (1u << holeBit)) != 0)
+                            continue; // cave entrance / pit: no terrain tris here
+
                         int v9_00 = vertexOffset + z * 9 + x;
                         int v9_01 = vertexOffset + z * 9 + x + 1;
                         int v9_10 = vertexOffset + (z + 1) * 9 + x;
@@ -701,6 +627,7 @@ public sealed class MmapExtractorService
                         areas.Add(areaType); areas.Add(areaType);
                     }
                 }
+                vertexOffset = vertices.Count / 3;
             }
         }
 
@@ -715,51 +642,6 @@ public sealed class MmapExtractorService
         var tileConns = _offMeshConnections
             .Where(c => c.MapId == (int)mapId && c.TileX == adtX && c.TileY == adtY)
             .ToArray();
-
-        // ----------------------------------------------------------------------
-        // Compute a single Y range for the WHOLE ADT (not per sub-tile).
-        //
-        // This mirrors the original Mangos MapBuilder.cpp behavior: the full ADT
-        // Y range is passed unchanged to every mini-tile's heightfield:
-        //
-        //     rcVcopy(config.bmin, bmin);
-        //     rcVcopy(config.bmax, bmax);
-        //     // per-tile config only touches X/Z; bmin[1]/bmax[1] stay global
-        //
-        // Why this matters for the 4x4 sub-tile architecture: at cave entrances
-        // or other vertical drops, the mountain-top and the cave floor can be
-        // ~hundreds of world units apart. If each sub-tile recomputes its Y
-        // range from vertices in its own (sub-tile + border) XZ bbox, a sub-tile
-        // sitting on the mountain top gets a Y range that does NOT include the
-        // cave floor. The cave-floor span rasterized in the border is then
-        // dropped by rcCreateHeightfield (its Y is outside [bmin[1], bmax[1]]).
-        // Detour then links the mountain-top span in the neighbor sub-tile to
-        // nothing at the cave-floor level — the portal goes "up" instead of
-        // "down", which is the bug the user is seeing.
-        //
-        // rcFilterLedgeSpans is NOT a concern with the full-ADT Y range: it only
-        // marks the HIGHER span of a ledge pair as unwalkable, never the lower
-        // one. And the spans it inspects are still the spans in the sub-tile's
-        // XZ cells — a larger Y range just gives the sparse heightfield more
-        // headroom to store them.
-        // ----------------------------------------------------------------------
-        float adtMaxX = adtMinX + WowConstants.TileSize;
-        float adtMaxZ = adtMinZ + WowConstants.TileSize;
-        float adtMinY = float.MaxValue, adtMaxY = float.MinValue;
-        for (int v = 0; v < geo.Vertices.Length; v += 3)
-        {
-            float vx = geo.Vertices[v];
-            float vy = geo.Vertices[v + 1];
-            float vz = geo.Vertices[v + 2];
-            if (vx < adtMinX || vx > adtMaxX || vz < adtMinZ || vz > adtMaxZ)
-                continue;
-            if (vy < adtMinY) adtMinY = vy;
-            if (vy > adtMaxY) adtMaxY = vy;
-        }
-        if (adtMinY == float.MaxValue) { adtMinY = 0; adtMaxY = 100f; }
-
-        _logger.LogInformation("[Mmap] ADT ({AdtX},{AdtY}) global Y range: [{MinY:F2}, {MaxY:F2}] (from {Verts} verts in ADT bbox)",
-            adtX, adtY, adtMinY, adtMaxY, geo.Vertices.Length / 3);
 
         float[] omVerts  = tileConns.Length > 0 ? new float[tileConns.Length * 6]  : Array.Empty<float>();
         float[] omRads   = tileConns.Length > 0 ? new float[tileConns.Length]       : Array.Empty<float>();
@@ -779,46 +661,37 @@ public sealed class MmapExtractorService
 
         var navData = new byte[]?[WowConstants.SubTilesPerAdtSide * WowConstants.SubTilesPerAdtSide];
 
+        int totalSlots = WowConstants.SubTilesPerAdtSide * WowConstants.SubTilesPerAdtSide;
 
-        // 4x4 sub-tiling implementation
-        // Replaced single-ADT tile logic with 16 Detour sub-tiles (4x4) per ADT.
-        // Detour tile coordinates are relative to the global origin.
-        float subTileSize = WowConstants.TileSize / 4f;
-        int baseDetourX = (maxAdtX - adtX) * 4;
-        int baseDetourY = (maxAdtY - adtY) * 4;
-
-        _logger.LogInformation("[Mmap] adt=({AdtX},{AdtY}) ADT bbox=[{MinX:F2},{MinY:F2},{MinZ:F2}]→[{MaxX:F2},{MaxY:F2},{MaxZ:F2}] baseDetour=({BDX},{BDY})",
-            adtX, adtY, adtMinX, adtMinY, adtMinZ, adtMaxX, adtMaxY, adtMaxZ, baseDetourX, baseDetourY);
-
-        for (int sy = 0; sy < 4; sy++)
+        // Sub-tiles are built sequentially within each ADT worker.
+        // Parallelism is controlled at the outer tile level (Parallel.ForEachAsync);
+        // parallelizing here too would multiply the thread count by itself.
+        for (int slot = 0; slot < totalSlots; slot++)
         {
-            for (int sx = 0; sx < 4; sx++)
-            {
-                int subTileIdx = sy * 4 + sx;
+            ct.ThrowIfCancellationRequested();
+            int subX = slot % WowConstants.SubTilesPerAdtSide;
+            int subY = slot / WowConstants.SubTilesPerAdtSide;
 
-                float subMinX = adtMinX + sx * subTileSize;
-                float subMinZ = adtMinZ + sy * subTileSize;
-                float subMaxX = subMinX + subTileSize;
-                float subMaxZ = subMinZ + subTileSize;
+            float minX = adtMinX + subX * WowConstants.SubTileSize;
+            float maxX = minX + WowConstants.SubTileSize;
+            float minZ = adtMinZ + subY * WowConstants.SubTileSize;
+            float maxZ = minZ + WowConstants.SubTileSize;
 
-                int detourTileX = baseDetourX + sx;
-                int detourTileY = baseDetourY + sy;
+            int detourTileX = (maxAdtX - adtX) * WowConstants.SubTilesPerAdtSide + subX;
+            int detourTileY = (maxAdtY - adtY) * WowConstants.SubTilesPerAdtSide + subY;
 
-                navData[subTileIdx] = BuildNavMeshTileSync(
-                    geo, detourTileX, detourTileY,
-                    subMinX, subMinZ, subMaxX, subMaxZ,
-                    adtMinY, adtMaxY,
-                    omVerts, omRads, omDirs, omAreas, omFlags);
-            }
+            navData[slot] = BuildNavMeshTileSync(
+                geo, detourTileX, detourTileY,
+                minX, minZ, maxX, maxZ,
+                omVerts, omRads, omDirs, omAreas, omFlags);
         }
 
         return navData;
     }
 
     private unsafe byte[]? BuildNavMeshTileSync(
-        TileGeometry geo, int detourTileX, int detourTileY,
+        TileGeometry geo, int adtX, int adtY,
         float minX, float minZ, float maxX, float maxZ,
-        float adtMinY, float adtMaxY,
         float[] omVerts, float[] omRads, byte[] omDirs, byte[] omAreas, ushort[] omFlags)
     {
         int vertCount = geo.VertexCount;
@@ -832,13 +705,30 @@ public sealed class MmapExtractorService
             WalkableHeight = _recastConfig.WalkableHeight,
             WalkableRadius = _recastConfig.WalkableRadius,
             WalkableClimb = _recastConfig.WalkableClimb,
-            MinRegionArea = 400,
-            MergeRegionArea = 1600,
+            // Tuned for sub-tile portal connection: 21 m² minimum region so
+            // narrow cave entrances / corridor floors aren't erased before
+            // Recast can form the polygons that reach the sub-tile border.
+            MinRegionArea = 100,
+            MergeRegionArea = 400,
             MaxSimplificationError = 1.3f,
-            TileX = detourTileX,
-            TileY = detourTileY,
+            TileX = adtX,
+            TileY = adtY,
             MaxVertsPerPoly = 6,
-            BorderSize = _recastConfig.WalkableRadius + 3
+            // BorderSize = 3.0 yards / cs ≈ 7 voxels (MaNGOS BORDER_RADIUS).
+            // WalkableRadius + 3 was only ~4 voxels (1.84m) — too thin to
+            // cover a WMO that crosses a sub-tile boundary, leaving the
+            // cave floor short of the border so no Detour portal forms.
+            BorderSize = Math.Max(7, _recastConfig.WalkableRadius + 3),
+            // World-unit Detour params (Mangos C++ hardcodes these — they
+            // land in the dtMeshHeader of every tile and are read back by
+            // Detour at pathfinding time). With these at 0, the dtMeshHeader
+            // is malformed → cross-tile portal links can be rejected as
+            // "no free space" and BuildBvTree=0 makes every query do a
+            // linear scan over all polys.
+            WalkableHeightWorld = 2.22155f,
+            WalkableRadiusWorld = 0.4f,
+            WalkableClimbWorld  = 1.0f,
+            BuildBvTree         = 1
         };
 
         // Expand the bounding box by BorderSize * CellSize on each XZ side so that
@@ -850,26 +740,13 @@ public sealed class MmapExtractorService
         float expandedMinZ = minZ - borderMeters;
         float expandedMaxZ = maxZ + borderMeters;
 
-        // Use the ADT-wide Y range passed by BuildNavMeshSubTilesSync — this is
-        // the FIX for cave entrances / vertical drops at sub-tile boundaries.
-        //
-        // Original (buggy): each sub-tile recomputed its Y range from vertices in
-        // its own (sub-tile + border) XZ bbox. A sub-tile sitting on a mountain
-        // top above a cave entrance would get a Y range that does NOT include the
-        // cave floor (which lives in a different sub-tile). The cave-floor span
-        // rasterized inside the border was then silently dropped by
-        // rcCreateHeightfield (its Y is outside the local Y range), and Detour
-        // linked the mountain-top span of the neighbor sub-tile to nothing at
-        // the cave-floor level — producing the "connects on top instead of
-        // bottom" artefact.
-        //
-        // Fixed: use the full ADT Y range for every sub-tile, matching the
-        // original Mangos MapBuilder.cpp behavior. This is safe because
-        // rcFilterLedgeSpans only ever marks the HIGHER span of a ledge pair as
-        // unwalkable, and a wider Y range only gives the sparse heightfield
-        // more headroom — it does not change which spans exist in each cell.
-        float minY = adtMinY;
-        float maxYh = adtMaxY;
+        float minY = float.MaxValue, maxYh = float.MinValue;
+        for (int v = 1; v < geo.Vertices.Length; v += 3)
+        {
+            if (geo.Vertices[v] < minY) minY = geo.Vertices[v];
+            if (geo.Vertices[v] > maxYh) maxYh = geo.Vertices[v];
+        }
+        if (minY == float.MaxValue) { minY = 0; maxYh = 100f; }
 
         fixed (float* v = geo.Vertices)
         fixed (int* i = geo.Indices)
@@ -890,7 +767,7 @@ public sealed class MmapExtractorService
             _logger.LogDebug("[Mmap] RecastBuildParams: adt=({AX},{AY}) " +
                 "bbox=[{MinX:F2},{MinY:F2},{MinZ:F2}]→[{MaxX:F2},{MaxY:F2},{MaxZ:F2}] " +
                 "cellSize={CS:F6} cellHeight={CH:F3} input: {Verts} verts {Tris} tris {OmCount} offmesh",
-                detourTileX, detourTileY,
+                adtX, adtY,
                 p.BoundingBoxMinX, p.BoundingBoxMinY, p.BoundingBoxMinZ,
                 p.BoundingBoxMaxX, p.BoundingBoxMaxY, p.BoundingBoxMaxZ,
                 p.CellSize, p.CellHeight, vertCount, triCount, omVerts.Length / 6);
@@ -899,7 +776,7 @@ public sealed class MmapExtractorService
             int outSize;
             int omCount = omVerts.Length / 6;
 
-            _logger.LogInformation("[Mmap] BuildTile DLL call: adt=({AX},{AY}) {Verts}v {Tris}t", detourTileX, detourTileY, vertCount, triCount);
+            _logger.LogInformation("[Mmap] BuildTile DLL call: adt=({AX},{AY}) {Verts}v {Tris}t", adtX, adtY, vertCount, triCount);
             if (!RecastNative.BuildTile(&p, v, vertCount, i, triCount, a,
                 omCount > 0 ? pOmVerts : null,
                 omCount > 0 ? pOmRads  : null,
@@ -908,14 +785,14 @@ public sealed class MmapExtractorService
                 omCount > 0 ? pOmFlags : null,
                 omCount, &outData, &outSize))
             {
-                _logger.LogWarning("[Mmap] BuildTile FAILED for adt=({AX},{AY})", detourTileX, detourTileY);
+                _logger.LogWarning("[Mmap] BuildTile FAILED for adt=({AX},{AY})", adtX, adtY);
                 return null;
             }
 
-            _logger.LogInformation("[Mmap] BuildTile DLL returned: adt=({AX},{AY}) size={Size}", detourTileX, detourTileY, outSize);
+            _logger.LogInformation("[Mmap] BuildTile DLL returned: adt=({AX},{AY}) size={Size}", adtX, adtY, outSize);
             if (outData == null || outSize <= 0)
             {
-                _logger.LogWarning("[Mmap] BuildTile returned empty for adt=({AX},{AY})", detourTileX, detourTileY);
+                _logger.LogWarning("[Mmap] BuildTile returned empty for adt=({AX},{AY})", adtX, adtY);
                 return null;
             }
 
@@ -936,22 +813,7 @@ public sealed class MmapExtractorService
         {
             Directory.CreateDirectory(_outputDir);
 
-            // C# multi-tile format: ONE mmtile per ADT containing all 16
-            // sub-tiles (4x4) combined. The 4x4 sub-tiling is done internally
-            // for finer navmesh granularity, but the on-disk format is one
-            // blob per ADT (not 16 separate files).
-            //
-            // File layout (20-byte header + per-sub-tile blocks):
-            //   uint32 mmapMagic            = 0x50414D4D "MMAP" LE
-            //   uint32 dtVersion            = 7
-            //   uint32 mmapVersion          = 5 (multi-tile version)
-            //   uint32 subTileCount         = 16
-            //   uint32 1u                   (reserved/unknown)
-            //   For each sub-tile:
-            //     uint32 size               (navmesh data size, 0 if empty)
-            //     byte[size] data           (Detour navmesh blob)
-            //
-            // Filename: {mapId:D3}{adtY:D2}{adtX:D2}.mmtile (ADT coordinates)
+            // {mapId:D3}{adtY:D2}{adtX:D2}.mmtile — same convention as map-extractor output
             string fileName = $"{mapId:D3}{fileTileX:D2}{fileTileY:D2}.mmtile";
             string filePath = Path.Combine(_outputDir, fileName);
 
@@ -975,20 +837,198 @@ public sealed class MmapExtractorService
         }, ct);
     }
 
-    /// <summary>
-    /// Clears cached GameObject model data. Called between extractions to free memory.
-    /// The AdtParser is intentionally NOT used by the mmap — terrain comes from .map files.
-    /// </summary>
-    internal void ClearCache() => _gameObjectModelCache.Clear();
+    internal void ClearCache() => _adtParser.ClearCache();
 
-    // NOTE: WMO/M2 geometry is now loaded from the compiled .vmo/.vmd files
-    // by MangosVmapGeometryLoader (see LoadTileGeometryAsync). The previous
-    // raw-parse path is intentionally removed to follow the official Mangos
-    // pipeline: vmap-extractor writes .vmtile/.vmo/.vmd, mmap-extractor reads
-    // them. The raw WmoParser/M2Parser instances are still used for
-    // GameObject spawns (see LoadGameObjectM2 / LoadGameObjectWmo below)
-    // because GameObjects reference their source .m2/.wmo directly via the
-    // gameobject_spawns.bin + GameObjectDisplayInfo.dbc lookup.
+    // -----------------------------------------------------------------------
+    // WMO geometry: loads collision mesh from all WMO placements in an ADT.
+    // Transform math mirrors TerrainBuilder::loadVMap + transform() + copyVertices().
+    // -----------------------------------------------------------------------
+
+    private async Task AppendWmoGeometryAsync(
+        AdtFile adt,
+        List<float> outVerts,
+        List<int> outTris,
+        List<byte> outAreas,
+        HashSet<uint> seenUniqueIds,
+        CancellationToken ct)
+    {
+        foreach (var modf in adt.WmoPlacements)
+        {
+            if (!seenUniqueIds.Add(modf.UniqueId))
+                continue; // already processed this WMO placement
+
+            if (modf.NameId >= adt.WmoNames.Length)
+                continue;
+
+            string wmoName = adt.WmoNames[modf.NameId];
+            if (string.IsNullOrEmpty(wmoName))
+                continue;
+
+            var wmoResult = await _wmoParser.ParseRootAsync(wmoName, ct);
+            if (!wmoResult.Success || wmoResult.Root == null)
+                continue;
+
+            // Build rotation matrix matching C++ TerrainBuilder:
+            //   G3D: rotation = fromEulerAnglesXYZ(iRot.z*pi/-180, iRot.x*pi/-180, iRot.y*pi/-180)
+            //   G3D v * kXMat(θ) = Rx(-θ) because G3D column-vector matrix used in row-vector multiply.
+            //   So v * kXMat(-α) = Rx(α). Net effect: Rx(RotZ*π/180), Ry(RotX*π/180), Rz(RotY*π/180).
+            //   System.Numerics CreateRotationX(θ) = standard Rx(θ) → use POSITIVE angles.
+            float ax = modf.RotationZ * MathF.PI / 180f;
+            float ay = modf.RotationX * MathF.PI / 180f;
+            float az = modf.RotationY * MathF.PI / 180f;
+            var rotMatrix = Matrix4x4.CreateRotationX(ax)
+                          * Matrix4x4.CreateRotationY(ay)
+                          * Matrix4x4.CreateRotationZ(az);
+
+            // Position: fixCoords(rawPos) = (pos.z, pos.x, pos.y)
+            //   iPos.x = PositionZ,  iPos.y = PositionX,  iPos.z = PositionY (height)
+            //   position = iPos - (32*TileSize, 32*TileSize, 0)
+            float posX = modf.PositionZ - 32f * WowConstants.TileSize;
+            float posY = modf.PositionX - 32f * WowConstants.TileSize;
+            float posZ = modf.PositionY; // height, no adjustment
+
+            for (uint groupIdx = 0; groupIdx < wmoResult.Root.Header.GroupCount; groupIdx++)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                string groupPath = BuildWmoGroupPath(wmoName, groupIdx);
+                var grp = await _wmoParser.ParseGroupAsync(groupPath, (int)groupIdx, wmoName, ct);
+                if (grp == null)
+                {
+                    _logger.LogInformation("[WMO] {Path} group {Idx}: parse returned null", wmoName, groupIdx);
+                    continue;
+                }
+                if (grp.Vertices.Length == 0 || grp.Triangles.Length == 0)
+                {
+                    _logger.LogInformation("[WMO] {Path} group {Idx}: {V} verts, {T} tris → skipped (empty)", wmoName, groupIdx, grp.Vertices.Length, grp.Triangles.Length);
+                    continue;
+                }
+                _logger.LogInformation("[WMO] {Path} group {Idx}: {V} verts, {T} tris → adding", wmoName, groupIdx, grp.Vertices.Length, grp.Triangles.Length);
+
+                // Precise mode (preciseVectorData=true): include ALL triangles.
+                // Matches MaNGOS C++ default — no MOPY filtering for mmap/navmesh.
+                // Recast's slope filter handles walls (too steep = non-walkable);
+                // solid geometry blocks agents from walking through buildings.
+                var validTris = new List<int>(grp.Triangles.Length);
+                for (int t = 0; t < grp.Triangles.Length; t++)
+                    validTris.Add(t);
+
+                if (validTris.Count == 0)
+                    continue;
+
+                // Collect the vertex indices actually referenced by valid triangles
+                var usedVertSet = new HashSet<ushort>(validTris.Count * 3);
+                foreach (int t in validTris)
+                {
+                    var tri = grp.Triangles[t];
+                    usedVertSet.Add(tri.I0);
+                    usedVertSet.Add(tri.I1);
+                    usedVertSet.Add(tri.I2);
+                }
+
+                // Transform and add referenced vertices; build old→new index map
+                var vertRemap = new Dictionary<ushort, int>(usedVertSet.Count);
+                foreach (ushort vi in usedVertSet)
+                {
+                    if (vi >= grp.Vertices.Length)
+                        continue;
+                    var v = grp.Vertices[vi];
+                    vertRemap[vi] = outVerts.Count / 3;
+                    // VMapExtractor stores raw MOVT vertices (no fixCoords on individual vertices).
+                    // TerrainBuilder reads them raw — coordinate mapping is done by transform() itself.
+                    AppendTransformedVertex(v.X, v.Y, v.Z, rotMatrix, 1.0f, posX, posY, posZ, outVerts);
+                }
+
+                // Add triangles (no winding flip for WMO — isM2=false in original)
+                foreach (int t in validTris)
+                {
+                    var tri = grp.Triangles[t];
+                    if (!vertRemap.TryGetValue(tri.I0, out int r0)
+                        || !vertRemap.TryGetValue(tri.I1, out int r1)
+                        || !vertRemap.TryGetValue(tri.I2, out int r2))
+                        continue;
+                    outTris.Add(r0);
+                    outTris.Add(r1);
+                    outTris.Add(r2);
+                    outAreas.Add(1); // NAV_GROUND
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // M2 geometry: reads bounding (collision) mesh from M2 files directly.
+    // The vmap-extractor swaps I1↔I2 per triangle and then TerrainBuilder flips
+    // again (isM2=true), so the net winding is identical to the raw M2 indices.
+    // -----------------------------------------------------------------------
+
+    private void AppendM2Geometry(
+        AdtFile adt,
+        List<float> outVerts,
+        List<int> outTris,
+        List<byte> outAreas,
+        HashSet<uint> seenUniqueIds)
+    {
+        foreach (var mddf in adt.DoodadPlacements)
+        {
+            // mddf.FileDataId holds the placement uniqueId in WoW MDDF binary layout
+            if (!seenUniqueIds.Add(mddf.FileDataId))
+                continue; // already processed this M2 placement
+
+            if (mddf.NameId >= adt.ModelNames.Length)
+                continue;
+
+            string modelName = adt.ModelNames[mddf.NameId];
+            if (string.IsNullOrEmpty(modelName))
+                continue;
+
+            if (!_m2Parser.TryParseBoundingMesh(modelName, out float[] mverts, out ushort[] minds))
+                continue;
+            if (mverts.Length == 0 || minds.Length == 0)
+                continue;
+
+            // Build rotation matrix.
+            // MDDF rotation binary order: RotationY (yaw, first), RotationX (pitch, second), RotationZ (roll, third)
+            // In vmap: rot.x = ff[0] = mddf.RotationY (C# field), rot.y = ff[1] = mddf.RotationX, rot.z = ff[2] = mddf.RotationZ
+            // Same sign fix as WMO: C++ G3D v*kXMat(-α)=Rx(α), so use POSITIVE angles.
+            //   ax = RotationZ*π/180, ay = RotationY*π/180, az = RotationX*π/180
+            float ax = mddf.RotationZ * MathF.PI / 180f;
+            float ay = mddf.RotationY * MathF.PI / 180f; // C# field RotationY = yaw = vmap rot.x
+            float az = mddf.RotationX * MathF.PI / 180f; // C# field RotationX = pitch = vmap rot.y
+            var rotMatrix = Matrix4x4.CreateRotationX(ax)
+                          * Matrix4x4.CreateRotationY(ay)
+                          * Matrix4x4.CreateRotationZ(az);
+
+            // Position: fixCoords(rawPos) = (pos.z, pos.x, pos.y)
+            //   iPos.x = PositionZ,  iPos.y = PositionX,  iPos.z = PositionY (height)
+            float posX = mddf.PositionZ - 32f * WowConstants.TileSize;
+            float posY = mddf.PositionX - 32f * WowConstants.TileSize;
+            float posZ = mddf.PositionY;
+            float scale = mddf.Scale / 1024f;
+
+            int vertBase = outVerts.Count / 3;
+            int nVerts = mverts.Length / 3;
+            for (int i = 0; i < nVerts; i++)
+            {
+                float vx = mverts[i * 3 + 0];
+                float vy = mverts[i * 3 + 1];
+                float vz = mverts[i * 3 + 2];
+                // M2 is Z-up: pass raw vertices — no fixCoords needed (mirrors original VMap pipeline
+                // where M2 vertices are written raw and TerrainBuilder rotates them directly)
+                AppendTransformedVertex(vx, vy, vz, rotMatrix, scale, posX, posY, posZ, outVerts);
+            }
+
+            // Add triangles (no net winding flip — double-flip in original cancels out)
+            int nIndices = minds.Length;
+            for (int i = 0; i < nIndices; i += 3)
+            {
+                outTris.Add(vertBase + minds[i]);
+                outTris.Add(vertBase + minds[i + 1]);
+                outTris.Add(vertBase + minds[i + 2]);
+                outAreas.Add(1); // NAV_GROUND
+            }
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Shared transform helper — mirrors TerrainBuilder::transform() + copyVertices()
@@ -1024,97 +1064,122 @@ public sealed class MmapExtractorService
     }
 
     private GameObjectModelData? LoadGameObjectM2(string modelPath)
-        => LoadGameObjectVmoOrVmd(modelPath, isM2: true);
-
-    private GameObjectModelData? LoadGameObjectWmo(string modelPath)
-        => LoadGameObjectVmoOrVmd(modelPath, isM2: false);
-
-    // -----------------------------------------------------------------------
-    // Load a GameObject's compiled collision mesh from the vmap-extractor's
-    // output (vmaps/<path>.vmo or vmaps/<path>.vmd). This replaces the
-    // previous raw-MPQ parse path — the same way the C++ mmap-extractor
-    // reads gameobject collision meshes through VMapManager2 (which itself
-    // reads the .vmo/.vmd files produced by the vmap-extractor).
-    //
-    // The GameObjectSpawns index (gameobject_spawns.bin, user-provided) maps
-    // a GameObject GUID to a displayId, position, rotation and scale. The
-    // mmap service then resolves displayId → model path (via the DBC, which
-    // is the static model catalog and not gameplay data) and loads the
-    // matching compiled file.
-    //
-    // If the compiled file is missing (the vmap-extractor never built it —
-    // e.g. a model referenced from gameobject_spawns.bin but not from any
-    // ADT MDDF), the loader returns null and the spawn is skipped.
-    // -----------------------------------------------------------------------
-    private GameObjectModelData? LoadGameObjectVmoOrVmd(string modelPath, bool isM2)
     {
-        if (string.IsNullOrEmpty(_vmapDir))
+        if (!_m2Parser.TryParseBoundingMesh(modelPath, out float[] mverts, out ushort[] indices))
+            return null; // file not found or fundamentally invalid
+
+        if (mverts.Length == 0 || indices.Length == 0)
         {
-            _logger.LogDebug("[Mmap-GO] Cannot load {Model}: vmapDir not configured", modelPath);
-            return null;
+            // Valid M2 but no bounding collision mesh — return empty sentinel so caller
+            // can count it as skippedNoBounds (normal for decorative objects).
+            return new GameObjectModelData(modelPath, IsM2: true,
+                Array.Empty<float>(), Array.Empty<int>(),
+                Vector3.Zero, Vector3.Zero);
         }
 
-        string ext = isM2 ? MangosVmoReader.VmdExtension : MangosVmoReader.VmoExtension;
-        string compiledPath = Path.Combine(_vmapDir, "vmaps", modelPath.Replace('\\', '/') + ext);
-        if (!File.Exists(compiledPath))
-        {
-            _logger.LogDebug("[Mmap-GO] Compiled collision file missing: {Path}", compiledPath);
-            return null;
-        }
-
-        var worldModel = MangosVmoReader.Read(compiledPath);
-        if (worldModel == null || !worldModel.Valid)
-        {
-            _logger.LogDebug("[Mmap-GO] Could not parse compiled file: {Path}", compiledPath);
-            return null;
-        }
-        if (worldModel.Groups.Count == 0)
-            return null; // valid file but no geometry
-
-        var vertices = new List<float>();
-        var indices = new List<int>();
+        // Apply fixCoords(v) = (v.Z, v.X, v.Y) to match the VMap pipeline:
+        // VMapExtractor stores M2 vertices as fixCoords(raw), so TerrainBuilder reads them
+        // pre-transformed. LoadGameObjectWmo does the same. We must be consistent.
+        int nv = mverts.Length / 3;
+        float[] vertices = new float[nv * 3];
         Vector3 boundsMin = new(float.MaxValue, float.MaxValue, float.MaxValue);
         Vector3 boundsMax = new(float.MinValue, float.MinValue, float.MinValue);
-
-        foreach (var grp in worldModel.Groups)
+        for (int i = 0; i < nv; i++)
         {
-            if (grp.Vertices.Length == 0 || grp.Triangles.Length == 0) continue;
-            int vertBase = vertices.Count / 3;
-            for (int v = 0; v < grp.Vertices.Length; v++)
-            {
-                var vec = grp.Vertices[v];
-                vertices.Add(vec.X);
-                vertices.Add(vec.Y);
-                vertices.Add(vec.Z);
-                boundsMin = Vector3.Min(boundsMin, vec);
-                boundsMax = Vector3.Max(boundsMax, vec);
-            }
-            for (int t = 0; t < grp.Triangles.Length; t++)
-            {
-                var tri = grp.Triangles[t];
-                indices.Add(vertBase + (int)tri.I0);
-                indices.Add(vertBase + (int)tri.I1);
-                indices.Add(vertBase + (int)tri.I2);
-            }
-        }
-
-        if (vertices.Count == 0)
-        {
-            // Compiled file parsed but produced no geometry — return empty
-            // sentinel so the caller can count it as skippedNoBounds.
-            return new GameObjectModelData(modelPath, IsM2: isM2,
-                Array.Empty<float>(), Array.Empty<int>(), Vector3.Zero, Vector3.Zero);
+            float rx = mverts[i * 3 + 2]; // fixCoords: vz → stored x
+            float ry = mverts[i * 3 + 0]; // fixCoords: vx → stored y
+            float rz = mverts[i * 3 + 1]; // fixCoords: vy → stored z
+            vertices[i * 3 + 0] = rx;
+            vertices[i * 3 + 1] = ry;
+            vertices[i * 3 + 2] = rz;
+            boundsMin.X = MathF.Min(boundsMin.X, rx);
+            boundsMin.Y = MathF.Min(boundsMin.Y, ry);
+            boundsMin.Z = MathF.Min(boundsMin.Z, rz);
+            boundsMax.X = MathF.Max(boundsMax.X, rx);
+            boundsMax.Y = MathF.Max(boundsMax.Y, ry);
+            boundsMax.Z = MathF.Max(boundsMax.Z, rz);
         }
 
         return new GameObjectModelData(
             modelPath,
-            IsM2: isM2,
-            vertices.ToArray(),
-            indices.ToArray(),
+            IsM2: true,
+            vertices,
+            Array.ConvertAll(indices, static x => (int)x),
             boundsMin,
             boundsMax);
     }
 
+    private GameObjectModelData? LoadGameObjectWmo(string modelPath)
+    {
+        var rootResult = _wmoParser.ParseRootAsync(modelPath).GetAwaiter().GetResult();
+        if (!rootResult.Success || rootResult.Root == null)
+            return null;
+
+        var vertices = new List<float>();
+        var indices = new List<int>();
+
+        for (uint groupIdx = 0; groupIdx < rootResult.Root.Header.GroupCount; groupIdx++)
+        {
+            string groupPath = BuildWmoGroupPath(modelPath, groupIdx);
+            var group = _wmoParser.ParseGroupAsync(groupPath, (int)groupIdx, modelPath).GetAwaiter().GetResult();
+            if (group == null || group.Vertices.Length == 0 || group.Triangles.Length == 0)
+                continue;
+
+            // Precise mode: include ALL triangles (no MOPY filtering).
+            var validTris = new List<int>(group.Triangles.Length);
+            for (int t = 0; t < group.Triangles.Length; t++)
+                validTris.Add(t);
+            var usedVerts = new HashSet<ushort>(validTris.Count * 3);
+            foreach (int triIndex in validTris)
+            {
+                var tri = group.Triangles[triIndex];
+                usedVerts.Add(tri.I0);
+                usedVerts.Add(tri.I1);
+                usedVerts.Add(tri.I2);
+            }
+
+            var remap = new Dictionary<ushort, int>(usedVerts.Count);
+            foreach (ushort vertIndex in usedVerts)
+            {
+                if (vertIndex >= group.Vertices.Length)
+                    continue;
+
+                var vertex = group.Vertices[vertIndex];
+                remap[vertIndex] = vertices.Count / 3;
+                // fixCoords(v) = (v.Z, v.X, v.Y) in the old VMAP pipeline before transform()
+                vertices.Add(vertex.Z);
+                vertices.Add(vertex.X);
+                vertices.Add(vertex.Y);
+            }
+
+            foreach (int triIndex in validTris)
+            {
+                var tri = group.Triangles[triIndex];
+                if (!remap.TryGetValue(tri.I0, out int r0)
+                    || !remap.TryGetValue(tri.I1, out int r1)
+                    || !remap.TryGetValue(tri.I2, out int r2))
+                    continue;
+
+                indices.Add(r0);
+                indices.Add(r1);
+                indices.Add(r2);
+            }
+        }
+
+        if (vertices.Count == 0 || indices.Count == 0)
+            return null;
+
+        Vector3 boundsMin = new(
+            rootResult.Root.Header.BoundingBoxMin.X,
+            rootResult.Root.Header.BoundingBoxMin.Y,
+            rootResult.Root.Header.BoundingBoxMin.Z);
+        Vector3 boundsMax = new(
+            rootResult.Root.Header.BoundingBoxMax.X,
+            rootResult.Root.Header.BoundingBoxMax.Y,
+            rootResult.Root.Header.BoundingBoxMax.Z);
+
+        return new GameObjectModelData(modelPath, IsM2: false, vertices.ToArray(), indices.ToArray(), boundsMin, boundsMax);
+    }
 
     private static void AppendGameObjectGeometry(
         GoSpawn spawn,

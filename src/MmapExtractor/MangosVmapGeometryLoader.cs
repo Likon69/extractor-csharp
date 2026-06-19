@@ -120,7 +120,12 @@ internal sealed class MangosVmapGeometryLoader
         if (string.IsNullOrEmpty(spawn.Name)) return false;
 
         string ext = spawn.IsM2 ? MangosVmoReader.VmdExtension : MangosVmoReader.VmoExtension;
-        string compiledPath = Path.Combine(_vmapDir, "vmaps", spawn.Name.Replace('/', Path.DirectorySeparatorChar) + ext);
+        // The C# vmap-extractor writes uniform names WITH the original extension (.wmo / .m2)
+        // and then replaces it when writing the .vmo / .vmd file. So the on-disk file is
+        // `ae376af...-foo.vmo` (no .wmo). Strip the trailing extension from spawn.Name before
+        // appending the compiled extension so the path matches what the vmap-extractor wrote.
+        string nameNoExt = Path.GetFileNameWithoutExtension(spawn.Name);
+        string compiledPath = Path.Combine(_vmapDir, "vmaps", nameNoExt + ext);
         if (!File.Exists(compiledPath))
         {
             _logger.LogDebug("[Mmap-Vmap] Compiled collision file missing: {Path}", compiledPath);
@@ -144,7 +149,7 @@ internal sealed class MangosVmapGeometryLoader
 
         // Build the placement transform — exact port of TerrainBuilder::loadVMap + transform.
         //
-        // Mangos C++:
+        // Mangos C++ (TerrainBuilder.cpp):
         //   float scale = instance.iScale;
         //   G3D::Matrix3 rotation = G3D::Matrix3::fromEulerAnglesXYZ(
         //       G3D::pi() * instance.iRot.z / -180.f,
@@ -156,29 +161,40 @@ internal sealed class MangosVmapGeometryLoader
         //   for v: v_world = v * rotation * scale + position; v.x *= -1; v.y *= -1;
         //
         // G3D's Vector3 * Matrix3 is row-vector (same as System.Numerics
-        // Vector3.Transform(v, M) which is v * M). So no transpose is needed —
-        // the same M, used the same way, gives the same world-space vertex.
-        //
-        // Mangos's fromEulerAnglesXYZ takes (-iRot.z, -iRot.x, -iRot.y) as
-        // (xAngle, yAngle, zAngle). System.Numerics CreateRotationX/Y/Z take
-        // the angle in radians. We use the same sign convention as Mangos.
-        float ax = -spawn.Rot[2] * MathF.PI / 180f; // xAngle = -iRot.z
-        float ay = -spawn.Rot[0] * MathF.PI / 180f; // yAngle = -iRot.x
-        float az = -spawn.Rot[1] * MathF.PI / 180f; // zAngle = -iRot.y
-        // fromEulerAnglesXYZ (Mangos): rotate about X, then Y, then Z.
-        // In System.Numerics row-vector convention, that is:
-        //   M = CreateRotationZ(z) * CreateRotationY(y) * CreateRotationX(x)
-        var rotMatrix = Matrix4x4.CreateRotationZ(az)
+        // Vector3.Transform(v, M) which is v * M). However, G3D's
+        // fromEulerAnglesXYZ uses column-vector convention internally:
+        //   v' = Rx(α)·Ry(β)·Rz(γ)·v
+        // and the row-vector multiply v*kXMat(θ) effectively computes
+        // v * (Rx(θ))^-1 = v * Rx(-θ). So Mangos's
+        //   rotation = fromEulerAnglesXYZ(-iRot.z, -iRot.x, -iRot.y)
+        //   = Rx(-iRot.z)·Ry(-iRot.x)·Rz(-iRot.y)   [column-vector]
+        // becomes, when used as row-vector multiply v*rotation:
+        //   v*rotation ≡ (rotation^T · v^T)^T  →  v · Rx(+iRot.z)·Ry(+iRot.x)·Rz(+iRot.y)
+        // i.e. angles flip sign AND order flips (X,Y,Z → Z,Y,X).
+        // Net result: rotation matrix = Rx(+iRot.z)·Ry(+iRot.x)·Rz(+iRot.y) in row-vector form.
+        float ax = spawn.Rot[2] * MathF.PI / 180f; // Rx angle = +iRot.z
+        float ay = spawn.Rot[0] * MathF.PI / 180f; // Ry angle = +iRot.x
+        float az = spawn.Rot[1] * MathF.PI / 180f; // Rz angle = +iRot.y
+        // fromEulerAnglesXYZ (Mangos) ≡ "rotate about X, then Y, then Z" applied to v via row-vector M.
+        // Row-vector convention: v * Rx * Ry * Rz applies Rz first, then Ry, then Rx to the vector.
+        var rotMatrix = Matrix4x4.CreateRotationX(ax)
                       * Matrix4x4.CreateRotationY(ay)
-                      * Matrix4x4.CreateRotationX(ax);
+                      * Matrix4x4.CreateRotationZ(az);
 
         // iPos in the .vmtile is stored by the vmap-extractor as
         // (pos.z, pos.x, pos.y) — MaNGOS vec3d.h::fixCoords (z, x, y).
-        // No -32G offset is applied to iPos (TileAssembler.cpp:135-138 has the
-        // offset line commented out). The mmap-extractor must convert this
-        // to standard (x, y, z) world coordinates before handing geometry
-        // off to the native Recast DLL, which expects (x, y, z).
-        Vector3 position = new(spawn.Pos[1], spawn.Pos[2], spawn.Pos[0]);
+        // No -32G offset is applied at storage time (TileAssembler.cpp:135-138
+        // has the offset line commented out). The C++ mmap-extractor applies
+        // the -32G offset itself (TerrainBuilder.cpp::loadVMap):
+        //   position.x -= 32 * GRID_SIZE;  // x-axis (which is world Z in fixCoords)
+        //   position.y -= 32 * GRID_SIZE;  // y-axis (which is world X in fixCoords)
+        // We must do the same in fixCoords space (no permutation), and let
+        // copyVertices() at the end (with v.x *= -1, v.y *= -1, then (v.y,v.z,v.x))
+        // produce the final standard (x,y,z) world coords.
+        Vector3 position = new(
+            spawn.Pos[0] - 32f * WowConstants.TileSize, // pos.x in fixCoords = origZ - 32G
+            spawn.Pos[1] - 32f * WowConstants.TileSize, // pos.y in fixCoords = origX - 32G
+            spawn.Pos[2]);                               // pos.z in fixCoords = origY (no offset)
         float scale = spawn.Scale;
 
         for (int g = 0; g < model.Groups.Count; g++)

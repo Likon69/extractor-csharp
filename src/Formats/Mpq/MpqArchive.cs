@@ -135,6 +135,13 @@ public sealed class MpqArchive : IArchiveReader
         }
     }
 
+    public void ForEachFileReversePriority(string pattern, Action<string> onFile)
+    {
+        // Single archive: priority order is trivial. Just iterate this archive.
+        foreach (var file in ListFiles(pattern))
+            onFile(file);
+    }
+
     public Stream? OpenFileStream(string path)
     {
         ThrowIfDisposed();
