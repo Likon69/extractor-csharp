@@ -31,15 +31,17 @@ Port byte-pour-byte des 4 extracteurs MaNGOS (Map, Vmap, Road, Mmap).
 
 ## Ce qui reste ❌ ou à revoir
 
-### Bug #1 — Map section liquid (tile 32,48)
-- `.map` C# = 174 224 bytes, REF = 174 740 bytes → **diff −516 bytes**
-- 516 bytes = 129 floats = exactement **1 ligne × 129 colonnes** de liquid en moins
-- Fichier : `src/Formats/Map/Writing/MapFileWriter.cs` lignes 105-188
-- Cause probable : off-by-one dans le scan des bornes (ligne 105) ou `liqH = liqMaxY - liqMinY + 2`
-- **Fix proposé** : changer `< 128` en `< 129`, ou `+1` à `liqH`/largeur
-- **Impact** : bug de map, pas de vmap ni mmap → non-bloquant pour le bot
+### Bug #1 — Map section liquid (tile 32,48) ✅ **CORRIGÉ** (commit `a8adb63`)
+- **Avant** : `.map` C# = 174 224 bytes, REF = 174 740 bytes → diff −516 bytes
+- **Après** : `.map` C# = REF = 174 740 bytes, **md5 identique** : `3f3961ec53c4b63127bfb8a600dca098`
+- 3 bugs liquid fixés dans le commit `a8adb63` :
+  1. MCLQ legacy path (TBC) jamais parsé → chunks MCLQ skippés → cellules visibles manquantes
+  2. liquidLevel computation : filtre `if (hv > NoLiq)` incluait des cellules non-visibles
+  3. liquid_show reset loop : `y < 128` au lieu de scan complet 256×256
+- **Validation** : 5 tuiles testées (0004832, 0004532, 0004930, 0003528, 0004630) → **byte-for-byte identical** à Mangos
+- Fichier : `src/Formats/Map/Writing/MapFileWriter.cs` (233 lignes changées dans a8adb63)
 
-### Bug #2 — TileAssembler break → continue ✅ **CORRIGÉ**
+### Bug #2 — TileAssembler break → continue ✅ **CORRIGÉ** (commit `3466d3e`)
 - **Avant** : `break;` au 1er M2 exotique → tous les spawns après perdus pour la map
 - **Après** : `continue;` + AABB 1×1×1 fallback au pos du spawn
 - **Validation** :
@@ -140,7 +142,7 @@ extractor-csharp/
 │   ├── Core/Binary/SpanReader.cs
 │   ├── Formats/
 │   │   ├── Adt/                           ← parsing ADT (MH2O, MCNK, etc.)
-│   │   ├── Map/Writing/MapFileWriter.cs   ← ⚠️ bug liquid ici
+│   │   ├── Map/Writing/MapFileWriter.cs   ← ✅ Bug #1 corrigé ici
 │   │   ├── Mpq/                           ← StormLib wrapper
 │   │   ├── Vmap/Mangos/
 │   │   │   ├── Bih.cs                     ← BIH (517 lignes, 3 tests OK)
