@@ -1,5 +1,9 @@
 # MaNGOS Extractor C# — WoW 3.3.5a NavMesh for CopilotBuddy
 
+<p align="center">
+  <img src="image.webp" alt="MaNGOS Extractor — WotLK navmesh processing" width="100%">
+</p>
+
 Navmesh extractor for World of Warcraft 3.3.5a (WotLK), originally
 developed for CopilotBuddy. It produces `.mmtile` files in the HonorBuddy
 format (PAMM, `mmapVer = 5`) compatible with `Navigation.dll`, with a
