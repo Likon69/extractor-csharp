@@ -4,26 +4,15 @@
   <img src="image.webp" alt="MaNGOS Extractor — WotLK navmesh processing" width="100%">
 </p>
 
-Navmesh extractor for World of Warcraft 3.3.5a (WotLK), originally
-developed for CopilotBuddy. It produces `.mmtile` files in the HonorBuddy
-format (PAMM, `mmapVer = 5`) compatible with `Navigation.dll`, with a
-**4x4 split per ADT**, full interior support (houses, dungeons, caves) and
-automatic obstacle avoidance (WMO, M2, GameObjects).
+Navmesh extractor for World of Warcraft 3.3.5a (WotLK). Produces `.mmtile` files in the HonorBuddy format (PAMM, `mmapVer = 5`) compatible with `Navigation.dll`, with a **4x4 split per ADT**, full interior support (houses, dungeons, caves) and automatic obstacle avoidance (WMO, M2, GameObjects).
 
-The tool is released as open source and can be driven both from the WPF
-graphical interface and from the headless command line. The Recast
-parameters are strictly identical to those of the HonorBuddy mesh
-generator.
+This project is a port and significant extension of the MaNGOS extractor, rewritten in C# with a WPF graphical interface, a 4x4 sub-tile system that did not exist in the original, and numerous additional features. The Recast parameters are strictly identical to those of the HonorBuddy mesh generator.
 
-This repository is part of the CopilotBuddy project. The bot itself lives
-in the `CopilotBuddy` repository, the C++ navmesh runtime that consumes
-these tiles lives in `Navigation C++`, and the extractor tools that
-produce them live here. All three repositories evolve together, with
-updates announced on the CopilotBuddy Discord.
+This repository is part of the CopilotBuddy project. The bot itself lives in the `CopilotBuddy` repository, the C++ navmesh runtime that consumes these tiles lives in `Navigation C++`, and the extractor tools that produce them live here. All three repositories evolve together — updates announced on the Discord:
 
-The porting effort started in July 2025, was paused, then restarted from
-scratch in October 2025 before being made public in January 2026. What
-you see in this repository today is the result of that second attempt.
+=> **[Discord](https://discord.com/invite/ep5TcGMCcB)** <=
+
+The porting effort started in July 2025, was paused, then restarted from scratch in October 2025 before being made public in January 2026.
 
 ---
 
@@ -45,41 +34,28 @@ you see in this repository today is the result of that second attempt.
 
 ## Features
 
-- Full extraction straight from the 3.3.5a client MPQ files (StormLib
-  bundled).
-- Generation of every MaNGOS artefact: `dbc/`, `maps/`, `vmaps/`,
-  `mmaps/`, `roadmaps/`.
-- **4x4 navmesh per ADT**: every ADT tile of 533 m is split into 16
-  Detour sub-tiles of 133.333 m on each side.
-- **Interior support**: houses, dungeons, caves and caverns through WMO
-  (World Model Objects) integration with their decorative M2 models.
-- **Automatic obstacle avoidance**: WMO/M2 geometry rasterized into the
-  heightfield, GameObjects computed via `GameObjectDisplayInfo.dbc` and
-  deduplicated.
-- Offmesh connections (jumps, teleports, transports) loaded from a plain
-  text file.
+- Full extraction straight from the 3.3.5a client MPQ files (StormLib bundled).
+- Generation of every MaNGOS artefact: `dbc/`, `maps/`, `vmaps/`, `mmaps/`, `roadmaps/`.
+- **4x4 navmesh per ADT**: every ADT tile of 533 m is split into 16 Detour sub-tiles of 133.333 m on each side.
+- **Interior support**: houses, dungeons, caves and caverns through WMO (World Model Objects) integration with their decorative M2 models.
+- **Automatic obstacle avoidance**: WMO/M2 geometry rasterized into the heightfield, GameObjects computed via `GameObjectDisplayInfo.dbc` and deduplicated.
+- Offmesh connections (jumps, teleports, transports) loaded from a plain text file.
 - Configurable parallelism, two modes: WPF GUI or headless CLI.
-- Native C++ DLL `RecastBuilderDll.dll` exposing `BuildTile`,
-  `TestPathfinding`, `TestPathfindingTwoFiles` for integration into any
-  third-party bot or tool.
-- Recast parameters strictly aligned with HonorBuddy's mesh generator
-  (see [Recast parameters](#recast-parameters--identical-to-honorbuddy)).
+- Native C++ DLL `RecastBuilderDll.dll` exposing `BuildTile`, `TestPathfinding`, `TestPathfindingTwoFiles` for integration into any third-party bot or tool.
+- Recast parameters strictly aligned with HonorBuddy's mesh generator (see [Recast parameters](#recast-parameters--identical-to-honorbuddy)).
 
 ---
 
 ## Quick build
 
-Requirements: Visual Studio 2022 with the *.NET desktop development*
-workload, MSBuild, and a C++ compiler (MSVC or MinGW) for the native
-DLL.
+Requirements: Visual Studio 2022 with the *.NET desktop development* workload, MSBuild, and a C++ compiler (MSVC or MinGW) for the native DLL.
 
 ```powershell
 cd extractor-csharp
 dotnet build MaNGOS.Extractor.sln -c Debug --nologo
 ```
 
-The native DLL must be copied next to the managed executable after each
-C++ build:
+The native DLL must be copied next to the managed executable after each C++ build:
 
 ```powershell
 Copy-Item "native\RecastBuilderDll\bin\Debug\RecastBuilderDll.dll" `
@@ -90,8 +66,7 @@ Copy-Item "native\RecastBuilderDll\bin\Debug\RecastBuilderDll.dll" `
 
 ## Command line usage (CLI)
 
-The CLI mode is meant for scripts, CI/CD automation, build farms or
-headless servers.
+The CLI mode is meant for scripts, CI/CD automation, build farms or headless servers.
 
 ### Syntax
 
@@ -154,9 +129,7 @@ dotnet "src\bin\Debug\net10.0-windows\MaNGOS.Extractor.dll" `
 
 ## Graphical interface usage (UI)
 
-The WPF interface provides real-time feedback, a clickable 64x64 grid to
-pick a map and ADT zone, and JSON configuration file management
-(`ExtractorConfig.json`).
+The WPF interface provides real-time feedback, a clickable 64x64 grid to pick a map and ADT zone, and JSON configuration file management (`ExtractorConfig.json`).
 
 Launch:
 
@@ -164,8 +137,7 @@ Launch:
 dotnet "src\bin\Debug\net10.0-windows\MaNGOS.Extractor.dll"
 ```
 
-The UI mirrors every CLI option (phases, maps, threads, offmesh,
-GameObjects) and writes the config file next to the `.dll`.
+The UI mirrors every CLI option (phases, maps, threads, offmesh, GameObjects) and writes the config file next to the `.dll`.
 
 ---
 
@@ -173,15 +145,12 @@ GameObjects) and writes the config file next to the `.dll`.
 
 ### The 4x4 principle
 
-Every ADT tile covers 533.333 meters (`GRID_SIZE = 533.333` per side,
-terrain laid out as a 64-cell WoW grid). HonorBuddy stores the navmesh as
-much smaller Detour sub-tiles for two reasons:
+Every ADT tile covers 533.333 meters (`GRID_SIZE = 533.333` per side, terrain laid out as a 64-cell WoW grid). HonorBuddy stores the navmesh as much smaller Detour sub-tiles for two reasons:
 
 - finer streaming granularity at read time,
 - better mesh resolution in dense areas.
 
-The extractor reproduces HonorBuddy's exact strategy
-(`MeshMapCalculator.Default`, `subTilesPerAdt = 4`):
+The extractor reproduces HonorBuddy's exact strategy (`MeshMapCalculator.Default`, `subTilesPerAdt = 4`):
 
 ```
 ADT 533.333 m x 533.333 m
@@ -190,79 +159,52 @@ ADT 533.333 m x 533.333 m
         +-- borderSize = 5 cells (walkableRadius + 3)
 ```
 
-The internal pipeline subdivides each sub-tile into **mini-tiles** of 80
-cells per side (identical to `VERTEX_PER_TILE = 80` in
-`MapBuilder.cpp`), then merges the resulting poly-meshes into a single
-`dtNavMeshData`.
+The internal pipeline subdivides each sub-tile into **mini-tiles** of 80 cells per side (identical to `VERTEX_PER_TILE = 80` in `MapBuilder.cpp`), then merges the resulting poly-meshes into a single `dtNavMeshData`.
 
 ### Interiors: houses, dungeons, caves
 
-Interior zones do **not** live on the ADT terrain itself. They come from
-WMO files listed in the ADT's `MODF` chunks, themselves composed of:
+Interior zones do **not** live on the ADT terrain itself. They come from WMO files listed in the ADT's `MODF` chunks, themselves composed of:
 
 - root WMO geometry — outer shell and main collision volumes,
 - WMO doodads — small architectural add-ons,
 - M2 models — doors, furniture, traps, etc.
 
-The extractor loads the full WMO hierarchy, keeps only the groups flagged
-`Flag_NoCollision = 0`, and injects the triangles into the Recast
-heightfield. As a result, a bot can path **inside** houses, follow
-corridors, descend into caves and exit through the right door.
+The extractor loads the full WMO hierarchy, keeps only the groups flagged `Flag_NoCollision = 0`, and injects the triangles into the Recast heightfield. As a result, a bot can path **inside** houses, follow corridors, descend into caves and exit through the right door.
 
-Cave entrances (areas where the ADT itself is fully covered by a WMO)
-are handled by exclusion: terrain triangles falling under a WMO are
-**not** rasterized (`continue; // cave entrance / pit`), otherwise Recast
-would see two solid layers and could not form the Detour portal between
-the outside and the inside.
+Cave entrances (areas where the ADT itself is fully covered by a WMO) are handled by exclusion: terrain triangles falling under a WMO are **not** rasterized (`continue; // cave entrance / pit`), otherwise Recast would see two solid layers and could not form the Detour portal between the outside and the inside.
 
 ---
 
 ## Object avoidance
 
-In addition to architectural WMOs, two more obstacle categories are
-taken into account.
+In addition to architectural WMOs, two more obstacle categories are taken into account.
 
 ### GameObjects (DBC + user-provided binary)
 
-In-game GameObjects (mailboxes, alchemy tables, campfires, portals,
-doors, etc.) are injected into the navmesh via their real collision
-model rather than a simple bounding cylinder.
+In-game GameObjects (mailboxes, alchemy tables, campfires, portals, doors, etc.) are injected into the navmesh via their real collision model rather than a simple bounding cylinder.
 
 The pipeline is:
 
-1. Read `GameObjectDisplayInfo.dbc` — maps a `displayId` to a model
-   path (M2 or WMO).
-2. Read the user-provided binary `gameobject_spawns.bin` — gives, for
-   every spawn, `mapId`, position, rotation quaternion, `displayId`.
-3. For each sub-tile, spatial filtering of GameObjects by AABB: only
-   those whose AABB overlaps the sub-tile + border bbox are processed.
-4. Fetch the collision model (M2 → skin LOD0 bounding mesh, or WMO →
-   collision groups), apply the quaternion + position transform, and
-   rasterize into the heightfield.
+1. Read `GameObjectDisplayInfo.dbc` — maps a `displayId` to a model path (M2 or WMO).
+2. Read the user-provided binary `gameobject_spawns.bin` — gives, for every spawn, `mapId`, position, rotation quaternion, `displayId`.
+3. For each sub-tile, spatial filtering of GameObjects by AABB: only those whose AABB overlaps the sub-tile + border bbox are processed.
+4. Fetch the collision model (M2 -> skin LOD0 bounding mesh, or WMO -> collision groups), apply the quaternion + position transform, and rasterize into the heightfield.
 
-A concurrent cache deduplicates already-loaded models: a single table
-model used 200 times is parsed only once.
+A concurrent cache deduplicates already-loaded models: a single table model used 200 times is parsed only once.
 
 ### Decorative M2 (WMO doodads)
 
-M2 placed by `MODF` entries in WMOs are parsed directly and their
-collision triangles injected. Bad winding and coordinate order have
-been fixed compared to the initial C# extractor
-(`fixCoords = (vz, vx, vy)` + flip).
+M2 placed by `MODF` entries in WMOs are parsed directly and their collision triangles injected. Bad winding and coordinate order have been fixed compared to the initial C# extractor (`fixCoords = (vz, vx, vy)` + flip).
 
 ### Roads
 
-The road mask (the `.road` file produced by the `Road` phase) is folded
-into the geometry; road areas keep `area = 1` but allow bots to follow
-paths without breaking the mesh.
+The road mask (the `.road` file produced by the `Road` phase) is folded into the geometry; road areas keep `area = 1` but allow bots to follow paths without breaking the mesh.
 
 ---
 
 ## Native API — `RecastBuilderDll`
 
-The C++ DLL exposes a small, stable ABI, suitable for any third-party
-integration (bot, pathfinding tool, viewer). Names and signatures follow
-C conventions.
+The C++ DLL exposes a small, stable ABI, suitable for any third-party integration (bot, pathfinding tool, viewer). Names and signatures follow C conventions.
 
 ### `BuildTile`
 
@@ -284,8 +226,7 @@ bool BuildTile(
     int*            outSize);
 ```
 
-Returns `false` if no polygon could be generated. `outData` is allocated
-on the C++ side and must be released with `FreeBuffer`.
+Returns `false` if no polygon could be generated. `outData` is allocated on the C++ side and must be released with `FreeBuffer`.
 
 ### `TestPathfinding`
 
@@ -299,8 +240,7 @@ int TestPathfinding(
     float* outPath, int maxPathPts);
 ```
 
-Returns the number of points written into `outPath`, or a negative error
-code:
+Returns the number of points written into `outPath`, or a negative error code:
 
 | Code | Meaning                           |
 |------|-----------------------------------|
@@ -315,9 +255,7 @@ code:
 
 ### `TestPathfindingTwoFiles`
 
-Cross-ADT variant: loads two `.mmtile` files, fixes absolute coordinates
-from each sub-tile's `bmin`, and resolves cross-tile links. Same error
-codes as `TestPathfinding`.
+Cross-ADT variant: loads two `.mmtile` files, fixes absolute coordinates from each sub-tile's `bmin`, and resolves cross-tile links. Same error codes as `TestPathfinding`.
 
 ### `FreeBuffer`
 
@@ -351,8 +289,7 @@ struct RecastBuildParams {
 };
 ```
 
-The default values used by the extractor are identical to HonorBuddy's
-— see the table below.
+The default values used by the extractor are identical to HonorBuddy's — see the table below.
 
 ---
 
@@ -363,8 +300,7 @@ File name : {mapId:D3}{adtY:D2}{adtX:D2}.mmtile
 Example   : 0004832.mmtile  ->  map = 0, adtY = 48, adtX = 32
 ```
 
-Every ADT file contains a 20-byte PAMM header followed by 16 Detour
-blobs (one per 4x4 sub-tile).
+Every ADT file contains a 20-byte PAMM header followed by 16 Detour blobs (one per 4x4 sub-tile).
 
 ### Binary header
 
@@ -425,8 +361,7 @@ Text format:
 
 ## Recast parameters — identical to HonorBuddy
 
-The values below are the ones used by the extractor and match strictly
-the HonorBuddy mesh generator.
+The values below are the ones used by the extractor and match strictly the HonorBuddy mesh generator.
 
 | Parameter                | Value      | Notes                                          |
 |--------------------------|------------|------------------------------------------------|
@@ -436,12 +371,11 @@ the HonorBuddy mesh generator.
 | `walkableHeight`         | 11         | voxels = 2.2 m                                 |
 | `walkableRadius`         | 2          | voxels = 0.606 m                               |
 | `walkableClimb`          | 5          | voxels = 1.0 m                                 |
-| `borderSize`             | 5          | walkableRadius + 3 (7 on Dalaran map 571)      |
-| `minRegionArea`          | 400        | = rcSqr(20)                                    |
-| `mergeRegionArea`        | 1600       | = rcSqr(40)                                    |
+| `borderSize`             | max(7, walkableRadius+3) | 7 minimum — covers WMOs crossing sub-tile boundaries |
+| `minRegionArea`          | 100        | Reduced from HB default (400) to preserve narrow cave entrances |
+| `mergeRegionArea`        | 400        | Reduced from HB default (1600) accordingly    |
 | `maxSimplificationError` | 1.3        |                                                |
 | `MaxVertsPerPoly`        | 6          |                                                |
-| `MINI_TILE_SIZE`         | 80         | identical to HB's VERTEX_PER_TILE             |
 
 ---
 
@@ -487,25 +421,13 @@ extractor-csharp/
 
 ## Community and contributing
 
-All appropriate contributions are welcome: code, documentation, profile
-XML, translations, bug reports and reproduction steps. The project is
-actively maintained and updates are pushed on a rolling basis.
+All appropriate contributions are welcome: code, documentation, bug reports and reproduction steps. The project is actively maintained and updates are pushed on a rolling basis.
 
-- Discord: jump into the CopilotBuddy server for updates, help and to
-  coordinate contributions.
-- Bug reports: open an issue with the client build, the phase you were
-  running, the map, the tile (when relevant) and a log excerpt. The
-  community has been extremely valuable in surfacing edge cases that
-  would never show up on a single machine.
-
-A sincere thank you to the community around CopilotBuddy. The bug
-reports, the test sessions, the steady stream of feedback and the
-patience during the early unstable builds are what keep this extractor
-moving forward, and the support is very much appreciated.
+- Discord: => **[Discord](https://discord.com/invite/ep5TcGMCcB)** <= — updates, help and contributions.
+- Bug reports: open an issue with the client build, the phase you were running, the map, the tile (when relevant) and a log excerpt.
 
 ---
 
 ## License
 
-This project is released as open source. See the `LICENSE` file for the
-full terms.
+This project is released as open source. See the `LICENSE` file for the full terms.
