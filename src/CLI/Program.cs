@@ -27,6 +27,12 @@ public static class Program
             app.InitializeComponent();
             return app.Run();
         }
+        if (args[0] == "pathfind")
+        {
+            var p = new string[args.Length - 1];
+            Array.Copy(args, 1, p, 0, p.Length);
+            return MaNGOS.Extractor.Tests.PathfindTest.Run(p);
+        }
         return RunCliAsync(args).GetAwaiter().GetResult();
     }
 
