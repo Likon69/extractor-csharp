@@ -97,7 +97,22 @@ public static class MangosDoodadExtractor
         // been run through fixCoords (see WMOInstance ctor); wmoRot is the
         // raw triplet of Euler angles (degrees) consumed by fromWMORot using
         // the ZYX-with-axis-swap convention that matches ModelInstance.cpp.
-        var wmoPos = FixCoords(modf.PositionX, modf.PositionY, modf.PositionZ);
+        //
+        // WMOInstance ctor (wmo.cpp:629-643) applies a worldspawn fix BEFORE
+        // fixCoords: if raw pos.x == 0 && pos.z == 0, set both to 533.33333*32
+        // so the WMO is anchored at the centre of the map. Mirror that here
+        // so the doodad's worldPos stays consistent with the WMO's iPos written
+        // by MangosVmapExtractorService.BuildWmoSpawn.
+        float wmoRawX = modf.PositionX;
+        float wmoRawY = modf.PositionY;
+        float wmoRawZ = modf.PositionZ;
+        if (wmoRawX == 0f && wmoRawZ == 0f)
+        {
+            const float HalfWorld = 533.33333f * 32f;
+            wmoRawX = HalfWorld;
+            wmoRawZ = HalfWorld;
+        }
+        var wmoPos = FixCoords(wmoRawX, wmoRawY, wmoRawZ);
         var wmoRot = WmoRotationMath.FromWmoRot(modf.RotationX, modf.RotationY, modf.RotationZ);
 
         // Pick the active doodad set. 0 is the default; only extract set 0
