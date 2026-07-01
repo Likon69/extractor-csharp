@@ -741,10 +741,16 @@ public sealed class MmapExtractorService
         float expandedMaxZ = maxZ + borderMeters;
 
         float minY = float.MaxValue, maxYh = float.MinValue;
-        for (int v = 1; v < geo.Vertices.Length; v += 3)
+        for (int v = 0; v < geo.Vertices.Length; v += 3)
         {
-            if (geo.Vertices[v] < minY) minY = geo.Vertices[v];
-            if (geo.Vertices[v] > maxYh) maxYh = geo.Vertices[v];
+            float vx = geo.Vertices[v];
+            float vy = geo.Vertices[v + 1];
+            float vz = geo.Vertices[v + 2];
+            if (vx < expandedMinX || vx > expandedMaxX ||
+                vz < expandedMinZ || vz > expandedMaxZ)
+                continue;
+            if (vy < minY) minY = vy;
+            if (vy > maxYh) maxYh = vy;
         }
         if (minY == float.MaxValue) { minY = 0; maxYh = 100f; }
 
