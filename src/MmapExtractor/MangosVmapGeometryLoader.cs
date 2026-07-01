@@ -160,23 +160,15 @@ internal sealed class MangosVmapGeometryLoader
         //   position.y -= 32 * GRID_SIZE;
         //   for v: v_world = v * rotation * scale + position; v.x *= -1; v.y *= -1;
         //
-        // G3D's Vector3 * Matrix3 is row-vector (same as System.Numerics
-        // Vector3.Transform(v, M) which is v * M). However, G3D's
-        // fromEulerAnglesXYZ uses column-vector convention internally:
-        //   v' = Rx(α)·Ry(β)·Rz(γ)·v
-        // and the row-vector multiply v*kXMat(θ) effectively computes
-        // v * (Rx(θ))^-1 = v * Rx(-θ). So Mangos's
-        //   rotation = fromEulerAnglesXYZ(-iRot.z, -iRot.x, -iRot.y)
-        //   = Rx(-iRot.z)·Ry(-iRot.x)·Rz(-iRot.y)   [column-vector]
-        // becomes, when used as row-vector multiply v*rotation:
-        //   v*rotation ≡ (rotation^T · v^T)^T  →  v · Rx(+iRot.z)·Ry(+iRot.x)·Rz(+iRot.y)
-        // i.e. angles flip sign AND order flips (X,Y,Z → Z,Y,X).
-        // Net result: rotation matrix = Rx(+iRot.z)·Ry(+iRot.x)·Rz(+iRot.y) in row-vector form.
-        float ax = spawn.Rot[2] * MathF.PI / 180f; // Rx angle = +iRot.z
-        float ay = spawn.Rot[0] * MathF.PI / 180f; // Ry angle = +iRot.x
-        float az = spawn.Rot[1] * MathF.PI / 180f; // Rz angle = +iRot.y
-        // fromEulerAnglesXYZ (Mangos) ≡ "rotate about X, then Y, then Z" applied to v via row-vector M.
-        // Row-vector convention: v * Rx * Ry * Rz applies Rz first, then Ry, then Rx to the vector.
+        // Both G3D's `Vector3 * Matrix3` operator and System.Numerics'
+        // `Vector3.Transform(v, M)` are row-vector: the leftmost matrix in a
+        // product is applied FIRST to the vector. So for rotMatrix = Rx*Ry*Rz
+        // applied via Vector3.Transform, the order is Rx → Ry → Rz, which is
+        // exactly the order G3D's v*M applies (via the M^T effect). The
+        // composition below matches the C++ bit-for-bit for any iRot.
+        float ax = spawn.Rot[2] * MathF.PI / 180f; // Rx angle = iRot.z (applied first)
+        float ay = spawn.Rot[0] * MathF.PI / 180f; // Ry angle = iRot.x (applied second)
+        float az = spawn.Rot[1] * MathF.PI / 180f; // Rz angle = iRot.y (applied third)
         var rotMatrix = Matrix4x4.CreateRotationX(ax)
                       * Matrix4x4.CreateRotationY(ay)
                       * Matrix4x4.CreateRotationZ(az);
@@ -220,9 +212,20 @@ internal sealed class MangosVmapGeometryLoader
                 outVerts.Add(wv.X);
             }
 
-            // copyIndices(flip = isM2). For WMO flip=false (raw order); for M2
-            // flip=true (swap idx1 <-> idx2 to compensate for M2's flipped
-            // bounding mesh winding on disk).
+            // copyIndices(flip = isM2). For WMO flip=false (raw (A,B,C) order); for M2
+            // flip=true we must emit the same triangle order the C++ does.
+            //
+            // Background: C++ writes (idx0, idx2, idx1) per triangle to .vmd (swap
+            // I1↔I2), then copyIndices(flip=true) writes (idx2, idx1, idx0), which
+            // for an original (A, B, C) triangle becomes (B, C, A). That's a cyclic
+            // permutation by 2 (right shift), which PRESERVES the original M2 winding.
+            // The C# .vmd is written WITHOUT the per-triangle swap, so for input
+            // (I0=A, I1=B, I2=C) we must emit (I1, I2, I0) = (B, C, A) to match.
+            //
+            // Emitting (I0, I2, I1) = (A, C, B) instead is a TRANSPOSITION
+            // (I1↔I2), which flips the winding — Recast then sees the M2 top face
+            // as a ceiling (normal −Z) and the bot walks at the base of the M2
+            // instead of on top of it. That was a real divergence; fixed here.
             bool flip = spawn.IsM2;
             int triCount = grp.Triangles.Length;
             if (flip)
@@ -230,9 +233,9 @@ internal sealed class MangosVmapGeometryLoader
                 for (int t = 0; t < triCount; t++)
                 {
                     var tri = grp.Triangles[t];
-                    outTris.Add(vertBase + (int)tri.I0);
-                    outTris.Add(vertBase + (int)tri.I2);
                     outTris.Add(vertBase + (int)tri.I1);
+                    outTris.Add(vertBase + (int)tri.I2);
+                    outTris.Add(vertBase + (int)tri.I0);
                     outAreas.Add(1); // NAV_GROUND
                 }
             }
