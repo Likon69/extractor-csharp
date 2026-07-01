@@ -34,6 +34,14 @@ internal static class RecastNative
         float startX, float startY, float startZ,
         float endX,   float endY,   float endZ,
         float* outPath, int maxPathPts);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern unsafe int TestPathfindingTwoFiles(
+        byte* tile1Data, int tile1Size,
+        byte* tile2Data, int tile2Size,
+        float startX, float startY, float startZ,
+        float endX,   float endY,   float endZ,
+        float* outPath, int maxPathPts);
 }
 
 [StructLayout(LayoutKind.Sequential)]
