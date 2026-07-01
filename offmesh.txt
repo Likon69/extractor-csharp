@@ -147,13 +147,6 @@
 571 20,26 (2877.8818 6223.361 105.379326) (2891.7466 6236.0654 208.90811) 3.0 6 1
 571 20,26 (2891.7466 6236.0654 208.90811) (2877.8818 6223.361 105.379326) 3.0 6 1
 
-# Map 0 - Eastern Kingdoms: Human starting zone — blocked cave passage
-# Poly #5332 (Ground) → Poly #6739 (Ground), straight 10.1 yd
-# Tunnel (areaType 1, bidirectional). Radius 2.0 matches Durotar Valley of Trials tunnel.
-# NOTE: X coords are NEGATIVE in Stormwind (WoW coordinate system) — sign dropped in bot's log output
-0 32,48 (-8679.297 -118.103935 90.97482) (-8653.302 -128.09535 88.88147) 5.0 1 1
-0 32,48 (-8653.302 -128.09535 88.88147) (-8679.297 -118.103935 90.97482) 5.0 1 1
-
 # Map 609 - Acherus: The Ebon Hold (DK starting zone)
 # Portal pair: Doodad_Nox_portal_purpl (entries 191538/191539)
 # Lower portal GO at (2390.02, -5640.91, 377.09), upper GO at (2383.65, -5645.20, 420.77)
