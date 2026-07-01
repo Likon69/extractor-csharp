@@ -914,10 +914,26 @@ public sealed class MangosVmapExtractorService
         //   pos  = fixCoords(Vec3D(x, y, z))           // = (Z, X, Y)
         //   iBound = fixCoords(bound) + (32G, 32G, 0)  // see TileAssembler.cpp:137
         // iPos is written as-is (no -32G), iBound gets the +32G offset.
-        var (fx, fy, fz) = FixCoords(modf.PositionX, modf.PositionY, modf.PositionZ);
+        //
+        // WMOInstance ctor (wmo.cpp:629-643) applies a worldspawn fix BEFORE
+        // fixCoords: if raw pos.x == 0 && pos.z == 0, set both to 533.33333*32.
+        // Without this, worldspawn WMOs (raw position at origin) would land at
+        // (0, 0, y) instead of (32G, 32G, y), and their doodad worldPos in
+        // MangosDoodadExtractor.ExtractSet would diverge from the WMO iPos by
+        // (32G, 32G, 0). Apply the same fix here.
+        float wmoRawX = modf.PositionX;
+        float wmoRawY = modf.PositionY;
+        float wmoRawZ = modf.PositionZ;
+        if (wmoRawX == 0f && wmoRawZ == 0f)
+        {
+            const float HalfWorld = 533.33333f * 32f;
+            wmoRawX = HalfWorld;
+            wmoRawZ = HalfWorld;
+        }
+        var (fx, fy, fz) = FixCoords(wmoRawX, wmoRawY, wmoRawZ);
         var (bLoX, bLoY, bLoZ) = FixCoords(modf.LowerBoundsX, modf.LowerBoundsY, modf.LowerBoundsZ);
         var (bHiX, bHiY, bHiZ) = FixCoords(modf.UpperBoundsX, modf.UpperBoundsY, modf.UpperBoundsZ);
-        const float HalfWorld = 32f * WowConstants.TileSize;
+        const float HalfWorldBound = 32f * WowConstants.TileSize;
         return new MangosModelSpawn
         {
             Flags = 0u, // MOD_M2 bit is clear for WMO
@@ -926,8 +942,8 @@ public sealed class MangosVmapExtractorService
             Pos = new[] { fx, fy, fz },
             Rot = new[] { modf.RotationX, modf.RotationY, modf.RotationZ },
             Scale = modf.Scale,
-            BoundLow  = new[] { bLoX + HalfWorld, bLoY + HalfWorld, bLoZ },
-            BoundHigh = new[] { bHiX + HalfWorld, bHiY + HalfWorld, bHiZ },
+            BoundLow  = new[] { bLoX + HalfWorldBound, bLoY + HalfWorldBound, bLoZ },
+            BoundHigh = new[] { bHiX + HalfWorldBound, bHiY + HalfWorldBound, bHiZ },
             Name = wmoName.Replace('\\', '/')
         };
     }
