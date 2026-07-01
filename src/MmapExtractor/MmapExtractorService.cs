@@ -1205,15 +1205,22 @@ public sealed class MmapExtractorService
             AppendTransformedVertex(vx, vy, vz, rotation, spawn.Scale, posX, posY, posZ, outVerts);
         }
 
-        // M2 models need winding reversed — mirrors TerrainBuilder::copyIndices(tris, offset, isM2=true).
-        // WMO GOs keep original winding (isM2=false → no flip).
+        // M2 models need a winding reorder — mirrors TerrainBuilder::copyIndices
+        // (flip=true). The C++ writes (idx2, idx1, idx0) for an M2 with loaded
+        // swapped .vmd indices; for the C# (which loads M2 indices directly from
+        // the MPQ in raw (A, B, C) order) the equivalent reorder is (I1, I2, I0) =
+        // (B, C, A) — a cyclic permutation by 2, which preserves the original
+        // M2 winding. Using (I2, I1, I0) = (C, B, A) instead would be a
+        // transposition that flips the winding — see the matching fix in
+        // MangosVmapGeometryLoader.AppendSpawnCollision for the full rationale.
+        // WMO GOs keep the original winding (isM2=false → no flip).
         bool flipWinding = modelData.IsM2;
         for (int i = 0; i < modelData.Indices.Length; i += 3)
         {
             if (flipWinding)
             {
-                outIndices.Add(baseIndex + modelData.Indices[i + 2]);
                 outIndices.Add(baseIndex + modelData.Indices[i + 1]);
+                outIndices.Add(baseIndex + modelData.Indices[i + 2]);
                 outIndices.Add(baseIndex + modelData.Indices[i + 0]);
             }
             else
