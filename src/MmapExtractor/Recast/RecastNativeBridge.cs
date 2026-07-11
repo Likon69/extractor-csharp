@@ -21,6 +21,20 @@ internal static class RecastNative
         byte** outData, int* outSize);
 
     [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+    public static extern unsafe RecastBuildResult BuildTileDetailed(
+        RecastBuildParams* p,
+        float* verts, int vertCount,
+        int* tris, int triCount,
+        byte* areaIds,
+        float* offMeshConVerts,
+        float* offMeshConRads,
+        byte* offMeshConDirs,
+        byte* offMeshConAreas,
+        ushort* offMeshConFlags,
+        int offMeshConCount,
+        byte** outData, int* outSize);
+
+    [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
     public static extern unsafe void FreeBuffer(void* buffer);
 
     /// <summary>
@@ -42,6 +56,16 @@ internal static class RecastNative
         float startX, float startY, float startZ,
         float endX,   float endY,   float endZ,
         float* outPath, int maxPathPts);
+}
+
+public enum RecastBuildResult : int
+{
+    Success = 0,
+    Empty = 1,
+    BadInput = -1,
+    OutOfMemory = -2,
+    MergeFailed = -3,
+    CreateNavDataFailed = -4
 }
 
 [StructLayout(LayoutKind.Sequential)]

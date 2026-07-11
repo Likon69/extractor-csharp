@@ -35,9 +35,32 @@ struct RecastBuildParams
     int   BorderSize;  // cells; expand bbox by BorderSize*cs on each XZ side, pass to rcBuildRegions
 };
 
+enum RecastBuildResult
+{
+    RECAST_BUILD_SUCCESS = 0,
+    RECAST_BUILD_EMPTY = 1,
+    RECAST_BUILD_BAD_INPUT = -1,
+    RECAST_BUILD_OUT_OF_MEMORY = -2,
+    RECAST_BUILD_MERGE_FAILED = -3,
+    RECAST_BUILD_CREATE_NAV_DATA_FAILED = -4
+};
+
 extern "C"
 {
     RECAST_API bool BuildTile(
+        const RecastBuildParams* params,
+        const float* verts, int vertCount,
+        const int*   tris,  int triCount,
+        const uint8_t* areaIds,
+        const float* offMeshConVerts,
+        const float* offMeshConRads,
+        const uint8_t* offMeshConDirs,
+        const uint8_t* offMeshConAreas,
+        const uint16_t* offMeshConFlags,
+        int offMeshConCount,
+        uint8_t** outData, int* outSize);
+
+    RECAST_API int BuildTileDetailed(
         const RecastBuildParams* params,
         const float* verts, int vertCount,
         const int*   tris,  int triCount,

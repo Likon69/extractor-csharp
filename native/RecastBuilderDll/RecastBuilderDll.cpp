@@ -31,7 +31,7 @@ extern "C"
 static const int MINI_TILE_SIZE     = 80;           // cells per mini-tile side (= MapBuilder.cpp VERTEX_PER_TILE)
 static const int MINI_TILE_EDGE_LEN = MINI_TILE_SIZE + 1;  // maxEdgeLen = tileSize+1, effectively uncapped within tile
 
-bool BuildTile(
+int BuildTileDetailed(
     const RecastBuildParams* params,
     const float* verts, int vertCount,
     const int*   tris,  int triCount,
@@ -45,7 +45,7 @@ bool BuildTile(
     uint8_t** outData, int* outSize)
 {
     if (!params || !verts || !tris || !outData || !outSize)
-        return false;
+        return RECAST_BUILD_BAD_INPUT;
 
     *outData = nullptr;
     *outSize = 0;
@@ -229,7 +229,7 @@ bool BuildTile(
     delete[] savedAreas;
 
     if (pmeshes.empty())
-        return false;
+        return RECAST_BUILD_EMPTY;
 
     // -----------------------------------------------------------------------
     // Merge all mini-tile poly meshes — same as MapBuilder.cpp rcMergePolyMeshes.
@@ -239,14 +239,14 @@ bool BuildTile(
     {
         for (auto p : pmeshes) rcFreePolyMesh(p);
         for (auto d : dmeshes) { if (d) rcFreePolyMeshDetail(d); }
-        return false;
+        return RECAST_BUILD_OUT_OF_MEMORY;
     }
     if (!rcMergePolyMeshes(&ctx, pmeshes.data(), (int)pmeshes.size(), *pmesh))
     {
         rcFreePolyMesh(pmesh);
         for (auto p : pmeshes) rcFreePolyMesh(p);
         for (auto d : dmeshes) { if (d) rcFreePolyMeshDetail(d); }
-        return false;
+        return RECAST_BUILD_MERGE_FAILED;
     }
     for (auto p : pmeshes) rcFreePolyMesh(p);
 
@@ -333,7 +333,7 @@ bool BuildTile(
     {
         if (dmesh) rcFreePolyMeshDetail(dmesh);
         rcFreePolyMesh(pmesh);
-        return false;
+        return RECAST_BUILD_CREATE_NAV_DATA_FAILED;
     }
 
     if (dmesh) rcFreePolyMeshDetail(dmesh);
@@ -341,7 +341,26 @@ bool BuildTile(
 
     *outData = navData;
     *outSize = navDataSize;
-    return true;
+    return RECAST_BUILD_SUCCESS;
+}
+
+bool BuildTile(
+    const RecastBuildParams* params,
+    const float* verts, int vertCount,
+    const int*   tris,  int triCount,
+    const uint8_t* areaIds,
+    const float* offMeshConVerts,
+    const float* offMeshConRads,
+    const uint8_t* offMeshConDirs,
+    const uint8_t* offMeshConAreas,
+    const uint16_t* offMeshConFlags,
+    int offMeshConCount,
+    uint8_t** outData, int* outSize)
+{
+    return BuildTileDetailed(
+        params, verts, vertCount, tris, triCount, areaIds,
+        offMeshConVerts, offMeshConRads, offMeshConDirs, offMeshConAreas,
+        offMeshConFlags, offMeshConCount, outData, outSize) == RECAST_BUILD_SUCCESS;
 }
 
 void FreeBuffer(void* ptr)
