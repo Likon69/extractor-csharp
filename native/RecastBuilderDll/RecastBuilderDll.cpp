@@ -302,8 +302,13 @@ int BuildTileDetailed(
     // placement offset. Mirrors C++ MapBuilder.cpp:
     //   rcVcopy(params.bmin, bmin)   ← but only after stripping the border
     // The actual strip is done above (coreBmin = bmin + borderMeters, etc.).
-    memcpy(navParams.bmin, coreBmin, sizeof(float) * 3);
-    memcpy(navParams.bmax, coreBmax, sizeof(float) * 3);
+    // Use the merged pmesh bmin/bmax (not the stripped coreBmin/coreBmax): verts in
+    // pmesh->verts are quantized against pmesh->bmin, so navParams.bmin must match for
+    // Detour to reconstruct world-space vertex positions correctly. coreBmin would
+    // introduce a borderMeters (~2.12m) offset, shifting the geometry and corrupting
+    // the BV-tree quantization.
+    memcpy(navParams.bmin, pmesh->bmin, sizeof(float) * 3);
+    memcpy(navParams.bmax, pmesh->bmax, sizeof(float) * 3);
     navParams.cs              = pmesh->cs;
     navParams.ch              = pmesh->ch;
     navParams.walkableHeight  = params->WalkableHeight * params->CellHeight;
